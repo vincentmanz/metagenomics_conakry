@@ -8,7 +8,7 @@ output:
     use_bookdown: true
     thumbnails: false
     number_sections: true
-    css: "ETBII.css"
+    css: "../ETBII.css"
 header-includes:
   - \usepackage{subfig}
   - \usepackage{booktabs}
@@ -82,7 +82,7 @@ samples_to_remove <- c("GI-103", "GI-59", "GI-104", "GI-111", "GI-121",
                        "GI-124", "GI-125", "GI-14", "GI-15", "GI-16", 
                        "GI-17", "GI-25", "GI-26", "GI-27", "GI-28", 
                        "GI-29", "GI-30", "GI-31", "GI-32", "GI-33", 
-                       "GI-34", "GI-36", "GI-38", "GI-39", "GI-45", "GI-47", "GI-51", "I9")
+                       "GI-34", "GI-36", "GI-38", "GI-39", "GI-45", "GI-47", "GI-51", "I9", "I7")
 
 # Prune these samples from your phyloseq object
 physeq <- prune_samples(!(sample_names(physeq) %in% samples_to_remove), physeq)
@@ -146,7 +146,7 @@ sample_data_df <- as.data.frame(as(physeq@sam_data, "data.frame"))
 merged_data <- dplyr::left_join(sample_data_df, nmds_spec_gg, by = "Sample")
 plt_read <- ggplot(merged_data, aes(x = MDS1, y = MDS2)) +
   geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +
-  geom_text_repel(aes(label = Sample), size = 3, color = "black") +
+  geom_text_repel(aes(label = Sample), size = 3, color = "black", max.overlaps = 50) +
   ggtitle("Read count") +
   theme_minimal()
 plt_read
@@ -171,7 +171,7 @@ sample_data_df <- as.data.frame(as(physeq@sam_data, "data.frame"))
 merged_data <- dplyr::left_join(sample_data_df, nmds_spec_gg, by = "Sample")
 plt_comp <- ggplot(merged_data, aes(x = MDS1, y = MDS2)) +
   geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +
-  geom_text_repel(aes(label = Sample), size = 3, color = "black") +
+  geom_text_repel(aes(label = Sample), size = 3, color = "black", max.overlaps = 50) +
   ggtitle("Compositional") +
   theme_minimal()
 plt_comp
@@ -196,7 +196,7 @@ sample_data_df <- as.data.frame(as(physeq@sam_data, "data.frame"))
 merged_data <- dplyr::left_join(sample_data_df, nmds_spec_gg, by = "Sample")
 plt_clr <- ggplot(merged_data, aes(x = MDS1, y = MDS2)) +
   geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +
-  geom_text_repel(aes(label = Sample), size = 3, color = "black") +
+  geom_text_repel(aes(label = Sample), size = 3, color = "black", max.overlaps = 50) +
   ggtitle("CLR") +
   theme_minimal()
 plt_clr
@@ -221,7 +221,7 @@ sample_data_df <- as.data.frame(as(physeq@sam_data, "data.frame"))
 merged_data <- dplyr::left_join(sample_data_df, nmds_spec_gg, by = "Sample")
 plt_z <- ggplot(merged_data, aes(x = MDS1, y = MDS2)) +
   geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +
-  geom_text_repel(aes(label = Sample), size = 3, color = "black") +
+  geom_text_repel(aes(label = Sample), size = 3, color = "black", max.overlaps = 50) +
   ggtitle("Z") +
   theme_minimal()
 plt_z
