@@ -1,0 +1,102 @@
+---
+title: "Reads QC and trimming"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+author: "Vincent Manzanilla, INTERTRYP, IRD"
+output: 
+  rmdformats::material:
+    code_folding: show
+    use_bookdown: true
+    thumbnails: false
+    number_sections: true
+    css: "../ETBII.css"  
+header-includes:
+  - \usepackage{subfig}
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+editor_options: 
+  markdown: 
+    wrap: 150
+---
+
+<!-- Custom title with logo -->
+<div class="title-container">
+  <img src="../data/IRD.png" alt="IRD Logo" class="logo">
+</div>
+
+```{=html}
+<style>
+.textbox {
+  border: 1px solid #ccc;
+  padding: 10px;
+  background-color: #f5f5f5;
+}
+
+.highlight {
+  background-color: yellow;
+  font-weight: bold;
+}
+</style>
+```
+
+# Sequencing
+
+Illumina 
+read length: 300bp 
+
+
+# Define list of samples
+
+
+```{bash, eval=F}
+cd /home/vincent/Documents/metagenomics_conakry/data/fastq
+
+# Store filenames in an array
+filenames=(*.fastq.gz)
+
+SAMPLES=()
+for f in "${filenames[@]}"; do
+  SAMPLES+=("$(echo "$f" | sed 's/_R[0-9]\+_001\.fastq.gz//')")
+done
+
+# Ensure unique samples
+SAMPLES=($(echo "${SAMPLES[@]}" | tr " " "\n" | sort -u | tr "\n" " "))
+
+# Print the unique samples
+echo "${SAMPLES[@]}"
+```
+
+# Run Cutadapt
+
+
+```{bash, eval=F}
+# Create output folder
+mkdir -p TRIMMED
+
+# Run Cutadapt
+for SAMPLE in "${SAMPLES[@]}"; do 
+  cutadapt "$SAMPLE"_R1_001.fastq.gz \
+           "$SAMPLE"_R2_001.fastq.gz \
+           -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA \
+           -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \
+           -o TRIMMED/"$SAMPLE".R1.fastq.gz \
+           -p TRIMMED/"$SAMPLE".R2.fastq.gz \
+           --minimum-length 280 \
+           --quality-cutoff 20 \
+           --cores 16 > TRIMMED/"$SAMPLE".cutadapt.log.txt
+done
+```
+
+# run fastQC and multiQC
+
+```{bash, eval=F}
+mkdir -p QC
+# Run FastQC on the trimmed reads
+for SAMPLE in "${SAMPLES[@]}"; do
+  fastqc TRIMMED/"$SAMPLE".R1.fastq.gz TRIMMED/"$SAMPLE".R2.fastq.gz -o QC
+done
+
+# Run MultiQC to aggregate FastQC results
+multiqc QC -o QC/multiqc_report
+```
+
+

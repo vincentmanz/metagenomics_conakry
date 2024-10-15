@@ -1,0 +1,421 @@
+---
+title: "Metabarcing - Diversity indices"
+author: "Vincent Manzanilla, INTERTRYP, IRD"
+date: "`r Sys.Date()`"
+output: 
+  rmdformats::material:
+    code_folding: show
+    use_bookdown: true
+    thumbnails: false
+    number_sections: true
+    css: "ETBII.css"
+header-includes:
+  - \usepackage{subfig}
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+editor_options: 
+  markdown: 
+    wrap: 150
+---
+
+```{=html}
+<style>
+
+.textbox {
+  border: 1px solid #ccc;
+  padding: 10px;
+  background-color: #f5f5f5;
+}
+
+.highlight {
+  background-color: yellow;
+  font-weight: bold;
+}
+</style>
+```
+# Diversity indices Introduction
+
+Species diversity, in its simplest definition, is the number of species in a particular area and their relative abundance (evenness). Once we know the
+taxonomic composition of our metagenomes, we can do diversity analyses. Here we will discuss the two most used diversity metrics, α diversity (within
+one metagenome) and β (across metagenomes).
+
+-   *α* Diversity: Can be represented only as richness (, i.e., the number of different species in an environment), or it can be measured considering
+    the abundance of the species in the environment as well (i.e., the number of individuals of each species inside the environment). To measure
+    α-diversity, we use indexes such as Shannon’s, Simpson’s, Chao1, etc.
+
+![diversity1](img/diversity1.png)
+
+*Alpha diversity is calculated according to fish diversity in a pond. Here, alpha diversity is represented in its simplest way: Richness.*
+
+In the next example, we will look at the α and the β components of the diversity of a dataset of fishes in three lakes. The most simple way to
+calculate the β-diversity is to calculate the distinct species between two lakes (sites). Let us take as an example the diversity between Lake A and
+Lake B. The number of species in Lake A is 3. To this quantity, we will subtract the number of these species that are shared with the Lake B: 2. So
+the number of unique species in Lake A compared to Lake B is (3-2) = 1. To this number, we will sum the result of the same operations but now take
+Lake B as our reference site. In the end, the β diversity between Lake A and Lake B is (3-2) + (3-2) = 2. This process can be repeated, taking each
+pair of lakes as the focused sites.
+
+![diversity2](img/diversity2.png) *Alpha and beta diversity indexes of fishes in a pond.*
+
+-   *β* diversity mesures how different two or more communities are, either in their composition (richness) or in the abundance of the organisms that
+    compose it (abundance).
+
+-   *Bray-Curtis dissimilarity*: The difference in richness and abundance across environments (samples). Weight on abundance. Measures the differences
+    from 0 (equal communities) to 1 (different communities)
+
+-   *Jaccard distance*: Based on the presence/absence of species (diversity). It goes from 0 (same species in the community) to 1 (no species in
+    common)
+
+-   *UniFrac*: Measures the phylogenetic distance; how alike the trees in each community are. There are two types, without weights (diversity) and
+    with weights (diversity and abundance) There are different ways to plot and show the results of such analysis. Among others, PCA, PCoA, or NMDS
+    analysis are widely used.
+
+![diversity3](img/diversity3.png)
+
+**Q: Which of the options below is true for the alpha diversity in lakes A, B, and beta diversity between lakes A and B, respectively?**
+
+-   4, 3, 1
+-   4, 3, 5
+-   9, 7, 16
+
+<details>
+
+<summary>HINT</summary>
+
+> 4, 3, 5 Alpha diversity in this case, is the sum of different species. Lake A has 4 different species and lake B has 3 different species. Beta
+> diversity refers to the difference between lake A and lake B. If we use the formula in Figure 2 we can see that to calculate beta diversity, we have
+> to detect the number of species and the number of shared species in both lakes. There is only one shared species, so we have to subtract the number
+> of shared species to the total species and sum the result. In this case, in lake A, we have 4 different species and one shared species with lake B
+> (4-1)=3, and in lake B we have three species and one shared species with lake A (3-1)=2. If we add 3+2, the result is 5.
+
+</details>
+
+# Alpha diversity
+
+A comprehensive list of global indicators of the ecosystem state can be obtained as follows. This includes various measures of richness, evenness,
+diversity, dominance, and rarity with default parameters. See the individual functions for more options regarding parameter tuning.
+
+## Loading the packages and environment
+
+::: textbox
+```{r lib, warning=FALSE, echo=FALSE, message=FALSE}
+library(dplyr)
+library(tibble)
+library(microbiome)
+library(vegan)
+library(FSA)
+library(SingleCellExperiment)
+library(ggrepel)
+library(patchwork)
+```
+:::
+
+## load the data
+
+::: textbox
+```{r data}
+setwd("./")
+merged_metagenomes <- phyloseq::import_biom("../data/fastq/kraken/bracken//merge_species.biom") 
+meta <- readxl::read_excel("../data/Glossina_metadata.xlsx")
+
+
+# Set the new column names in the phyloseq object
+sample_names(merged_metagenomes) <- gsub("_.*$|\\.kraken_report_bracken_genuses$", "", sample_names(merged_metagenomes))
+sample_names(merged_metagenomes) <- gsub("^Gl", "GI", sample_names(merged_metagenomes))
+# Sort the 'meta' data frame by the 'SRA.identifier' column
+meta$Sample <- gsub("_.*$", "", meta$Sample)
+meta$Samples <- meta$Sample
+meta <- meta %>% column_to_rownames(var = "Samples")
+
+meta$Sample == sample_names(merged_metagenomes)
+
+# Associate the sorted metadata to the phyloseq object as sample data
+merged_metagenomes@sam_data <- sample_data(meta)
+
+# Remove the unnecessary 'k_' prefix in the taxonomy data
+merged_metagenomes@tax_table@.Data <- substring(merged_metagenomes@tax_table@.Data, 4)
+
+# Rename the columns of the taxonomy table to represent taxonomic ranks
+colnames(merged_metagenomes@tax_table@.Data) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+#Keep only the kingdom of interest
+merged_metagenomes <- subset_taxa(merged_metagenomes, Kingdom =="Bacteria")
+# head(sample_data(merged_metagenomes))
+# head(tax_table(merged_metagenomes))
+```
+:::
+
+# Alpha diversity indices
+
+```{r tab}
+# Aggregate rare taxa at the Species level for the phyloseq object 'merged_metagenomes'
+# Taxa are included if they have a detection threshold of 0.05% and a prevalence of 20%
+pseq <- microbiome::aggregate_rare(merged_metagenomes, level = "Genus", detection = 0.05/100, prevalence = 20/100)
+
+# Calculate the Shannon diversity index for the aggregated phyloseq object 'pseq'
+# The Shannon index measures the diversity within a sample, considering both richness and evenness
+tab <- microbiome::alpha(pseq, index = 'shannon')
+
+# Display the first few rows of the calculated Shannon diversity index table
+head(tab)
+```
+
+This returns observed richness with given detection threshold(s).
+
+```{r rich}
+# Calculate the richness of the phyloseq object 'pseq' with a detection threshold of 1000
+# Richness is a measure of the number of different taxa present in a sample
+tab <- richness(pseq, detection = 1000)
+
+# Display the first few rows of the calculated richness table
+head(tab)
+```
+
+```{r shannon, eval=FALSE}
+sample_data(pseq)$infection <- as.factor(sample_data(pseq)$infection)
+p.shannon_infection <- boxplot_alpha(pseq, 
+                           index = "shannon",
+                           x_var = "infection",
+                          fill.colors = c("not infected"="#2A9D8F", "infected"="#E76F51" ))
+p.shannon_infection
+```
+
+```{r shannon, eval=FALSE}
+p.shannon_sex <- boxplot_alpha(pseq, 
+                           index = "shannon",
+                           x_var = "sex",
+                          fill.colors = c(F="deeppink4",M="darkorange1" ))
+p.shannon_sex
+```
+
+```{r shannon, eval=FALSE}
+colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Ecological gradient"] <- "Ecological.gradient"
+p.shannon_Ecological_gradient <- boxplot_alpha(pseq, 
+                           index = "shannon",
+                           x_var = "Ecological.gradient",
+                          fill.colors = c("wild"="#264653","ecotone"="#2A9D8F", "farmed land" = "#E9C46A", "urban"="#E76F51" ))
+p.shannon_Ecological_gradient
+```
+
+```{r shannon, eval=FALSE}
+colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Caracteristic Gradient"] <- "Caracteristic.Gradient"
+p.shannon_Caracteristic_gradient <- boxplot_alpha(pseq, 
+                           index = "shannon",
+                           x_var = "Caracteristic.Gradient",
+                          fill.colors = c(mangrove="#264653",'mangrove periphery'="#2A9D8F", "rice, palm trees at mangrove perif" = "#E9C46A", "rural with animals"="#E76F51" ))
+p.shannon_Caracteristic_gradient
+```
+
+```{r Chao1, eval=FALSE}
+sample_data(pseq)$infection <- as.factor(sample_data(pseq)$infection)
+p.Chao1_infection <- boxplot_alpha(pseq, 
+                           index = "Chao1",
+                           x_var = "infection",
+                          fill.colors = c("not infected"="#2A9D8F", "infected"="#E76F51" ))
+p.Chao1_infection
+```
+
+```{r Chao1}
+p.Chao1_sex <- boxplot_alpha(pseq, 
+                           index = "Chao1",
+                           x_var = "sex",
+                          fill.colors = c(F="deeppink4",M="darkorange1" ))
+p.Chao1_sex
+```
+
+```{r Chao1, eval=FALSE}
+p.Chao1_Ecological_gradient <- boxplot_alpha(pseq, 
+                           index = "Chao1",
+                           x_var = "Ecological.gradient",
+                          fill.colors = c("wild"="#264653","ecotone"="#2A9D8F", "farmed land" = "#E9C46A", "urban"="#E76F51" ))
+p.Chao1_Ecological_gradient
+```
+
+```{r Chao1}
+colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Caracteristic Gradient"] <- "Caracteristic.Gradient"
+p.Chao1_Caracteristic_gradient <- boxplot_alpha(pseq, 
+                           index = "Chao1",
+                           x_var = "Caracteristic.Gradient",
+                          fill.colors = c(mangrove="#264653",'mangrove periphery'="#2A9D8F", "rice, palm trees at mangrove perif" = "#E9C46A", "rural with animals"="#E76F51" )
+)
+p.Chao1_Caracteristic_gradient
+```
+
+```{r}
+# Arrange the plots side by side, one row for Shannon, one row for Chao1
+combined_plot <- gridExtra::grid.arrange(
+  gridExtra::arrangeGrob(p.shannon_sex, p.Chao1_sex, ncol = 2),
+  gridExtra::arrangeGrob(p.shannon_Ecological_gradient, p.Chao1_Ecological_gradient, ncol = 2),
+  gridExtra::arrangeGrob(p.shannon_Caracteristic_gradient, p.Chao1_Caracteristic_gradient, ncol = 2),
+  gridExtra::arrangeGrob(p.shannon_infection, p.Chao1_infection, ncol = 2),
+  nrow = 4
+)
+```
+
+Each of these metrics can give an insight into the distribution of the OTUs inside our samples. For example, the Chao1 diversity index gives more
+weight to singletons and doubletons observed in our samples, while Shannon is an entropy index remarking the impossibility of taking two reads out of
+the metagenome “bag” and that these two will belong to the same OTU.
+
+**Q: What do you observe?**
+
+# Statistical hypothesis for alpha diversity
+
+## Normality test: Check the Normal or not normal distribution
+
+Check normality of data: Shapiro Test & QQ-plots. Shapiro: H0 is «data follow normal distribution», H1 is «data do not follow normal distribution».
+
+Use the custom function indices_normality() (defined in HELPER/indices_normality.R) plots the results of Shapiro test (Theoritical Quantiles) as well
+as Q-Qplots. Means if p \< 0.05 -\> reject the H0 (so does not follow a normal distribution)
+
+```{r normalization_shap, eval=FALSE}
+
+
+tab_s <- microbiome::alpha(pseq, index = 'shannon')
+tab_c <- microbiome::alpha(pseq, index = 'Chao1')
+
+# Convert row names to a column for merging
+tab_s$Sample <- rownames(tab_s)
+tab_c$Sample <- rownames(tab_c)
+
+# Merge the two tables by the 'Sample' column
+merged_tab <- merge(tab_s, tab_c, by = "Sample")
+
+# Optionally, set the row names back to the 'Sample' column and remove it
+rownames(merged_tab) <- merged_tab$Sample
+merged_tab$Sample <- NULL
+
+merged_tab %>%
+  indices_normality(nrow = 2, ncol = 2)
+```
+
+***Q: What are your conclusions?***
+
+### Parametric (follows normal distribution) AND at least 3 groups - ANOVA test
+
+**Q: How many groups used? See the column "Type" of metadata? or Other variables?**
+
+<details>
+
+<summary>HINT</summary>
+
+> factor(meta\$Type)
+
+</details>
+
+You can use the ANOVA test to compare the means of the alpha diversity indexes between the three groups.
+
+```{r parametric_anova}
+tab <- microbiome::alpha(pseq, index=c("shannon", "Chao1"))
+metadata <- data.frame(sample_data(pseq))
+
+aov_observed <- stats::aov(tab$diversity_shannon ~ sex, metadata)
+summary(aov_observed)
+```
+
+You are comparing the effect of 3 types of experiments.
+
+**Q: What are your conclusions? What is the p-value?**
+
+It does not tell you which pair of groups are significantly differents!!!!
+
+Post-hoc test: Tukey multiple pairwise-comparisons
+
+```{r pval}
+signif_pairgroups <- stats::TukeyHSD(aov_observed, method = "bh")
+#plot(stats::TukeyHSD(aov_observed, method = "bh"))
+signif_pairgroups
+```
+
+**Q: What are your conclusions?**
+
+### Parametric (follows normal distribution) AND 2 groups - T-test
+
+```{r parametric_ttest}
+observed_ttest <- stats::t.test(tab$diversity_shannon ~ infection, data = metadata)
+observed_ttest
+```
+
+**Q: What are your conclusions?**
+
+### Non-parametric (do not follows normal distribution) AND at least 3 groups - Kruskal-Wallis
+
+```{r nonparametric_kruskal1}
+stats::kruskal.test(tab$chao1 ~ Ecological.gradient, data = metadata)
+```
+
+Post hoc test: Dunn test (pairwise group test)
+
+```{r nonparametric_kruskal2}
+#install.packages("FSA")
+signifgroup <- FSA::dunnTest(tab$chao1 ~ Caracteristic.Gradient,
+                           data = metadata,
+                           method = "bh")
+signifgroup
+```
+
+### Non-parametric (do not follows normal distribution) AND 2 groups - Wilcoxon rank sum
+
+```{r nonparametric_wilcoxon}
+tab_merged <- merge(rownames_to_column(tab, var = "Sample"), metadata)
+
+pairwise_test <- ggpubr::compare_means( diversity_shannon ~ infection,
+                                        tab_merged,
+                                       method = "wilcox.test")
+pairwise_test
+```
+
+*ns= non-significant,* =p\<0.05, **=p\<0.01,** *=p\<0.001,* \*\**=p\<0.0001*
+
+**Q: What are your conclusions?**
+
+Boxplot representation of the data
+
+```{r boxplot, eval=FALSE}
+
+graph_shan <- ggplot(metadata, aes(x = Ecological.gradient, y = tab$chao1)) + 
+  geom_boxplot(alpha = 0.6, fill = c("#264653", "#2A9D8F", "#E9C46A", "#E76F51")) +
+  geom_jitter(aes(colour = Caracteristic.Gradient), 
+              position = position_jitter(0.02), 
+              cex = 2.2) +
+  # scale_colour_manual(values = c("#a39715", "#04676e", "orange")) + # Manually set the colors
+  stat_summary(fun = mean, geom = "point", shape = 17, size = 3, color = "white") +
+  theme_minimal() 
+graph_shan
+# # Add p-value on graph
+# graph_shan + ggpubr::stat_pvalue_manual(
+#   pairwise_test,
+#   y.position = 3.5,
+#   label = "p.adj = {p.adj}",
+#   color = "blue",
+#   linetype = 1,
+#   tip.length = 0.01
+# )
+```
+
+Alternative to plot the indexes:
+
+```{r index1}
+plot_richness(merged_metagenomes, measures=c("Chao1", "Simpson"), color="sex")
+```
+
+############################## 
+
+## 1.2 Linear regression
+
+Determination coefficient R2 provides percentage variation in y which is explained by all the x together. Its value is (usually) between 0 and 1 and
+it indicates strength of Linear Regression model. Higher the R2 value, data points are less scattered so it is a good model. Lesser the R2 value is
+more scattered the data points.
+
+```{r reg, eval=FALSE}
+ggplot(tab_merged, aes(x = Ecological.gradient, y = diversity_shannon)) +
+  geom_point() +
+  stat_smooth(method = "lm", col = "red") +
+  ggpmisc::stat_poly_eq(aes(label = paste(after_stat(rr.label),
+                                          after_stat(p.value.label),
+                                          sep = "*\", \"*"))) +
+  theme_minimal()
+```
+
+**Q: try to interpret the results and re-run the regression for observed or shannon instead of chao1**
+
+As a reminder, shannon measures the diversity within a sample, considering both richness and evenness. Chao1 is a measure of the total number of
+species in a sample, and it is based on the number of rare species in the sample.

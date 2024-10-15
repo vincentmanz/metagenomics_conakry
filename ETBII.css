@@ -1,0 +1,21 @@
+/* Title container with flexbox for alignment */
+.title-container {
+  display: flex;
+  justify-content: space-between;  /* Title on the left, logo on the right */
+  align-items: center;  /* Keeps the title and logo aligned horizontally */
+  padding: 1em;
+  color: white;  /* White text color */
+  font-size: 1.5em;
+  font-weight: bold;
+}
+
+/* Style for the title */
+.title-container .title {
+  flex-grow: 1; /* Ensures the title takes up as much space as needed */
+}
+
+/* Style for the logo */
+.title-container .logo {
+  height: 80px;  /* Adjusts the logo size */
+  margin-top: -15px; /* Adjusts the logo height slightly upwards */
+}

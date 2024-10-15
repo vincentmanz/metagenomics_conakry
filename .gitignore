@@ -2,3 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+data/fastq/
+data/16S_Silva138_20200326/
+

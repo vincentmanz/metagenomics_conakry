@@ -1,0 +1,4356 @@
+---
+title: "Ticks time series - PLNmodels - Networks"
+date: "`r Sys.Date()`"
+author: "Vincent Manzanilla" 
+output: 
+  rmdformats::material:
+    code_folding: show
+    use_bookdown: true
+    thumbnails: false
+    number_sections: true
+    css: "ETBII.css"
+header-includes:
+  - \usepackage{subfig}
+  - \usepackage{booktabs}
+  - \usepackage{xcolor}
+editor_options: 
+  markdown: 
+    wrap: 150
+---
+
+```{=html}
+<style>
+
+.textbox {
+  border: 1px solid #ccc;
+  padding: 10px;
+  background-color: #f5f5f5;
+}
+
+.highlight {
+  background-color: yellow;
+  font-weight: bold;
+}
+</style>
+```
+# Import data, data mangling, scaling
+
+::: textbox
+```{r library, message = FALSE, warning = FALSE}
+library("dplyr")
+library("phyloseq")
+library("SNFtool")
+library("pheatmap")
+library("igraph")
+library("tibble")
+library("RCy3")
+library("igraph")
+library(microbiome)
+library(arcdiagram)
+library(MetaNet)
+library(PLNmodels)
+library(ggplot2)
+library(future)
+library(factoextra)
+library(tidyr)
+plan(multisession, workers = 15)
+physeq <- merged_metagenomes
+```
+:::
+
+# Import Data 
+
+## loading 
+
+```{r data}
+merged_metagenomes <- phyloseq::import_biom("../data/fastq/kraken/bracken//merge_species.biom")
+meta <- readxl::read_excel("../data/Glossina_metadata.xlsx")
+
+# Set the new column names in the phyloseq object
+sample_names(merged_metagenomes) <- gsub("_.*$|\\.kraken_report_bracken_genuses$", "", sample_names(merged_metagenomes))
+sample_names(merged_metagenomes) <- gsub("^Gl", "GI", sample_names(merged_metagenomes))
+# Sort the 'meta' data frame by the 'SRA.identifier' column
+meta$Sample <- gsub("_.*$", "", meta$Sample)
+meta$Samples <- meta$Sample
+meta <- meta %>% column_to_rownames(var = "Samples")
+
+# meta$Sample == sample_names(merged_metagenomes)
+
+# Associate the sorted metadata to the phyloseq object as sample data
+merged_metagenomes@sam_data <- sample_data(meta)
+
+# Remove the unnecessary 'k_' prefix in the taxonomy data
+merged_metagenomes@tax_table@.Data <- substring(merged_metagenomes@tax_table@.Data, 4)
+
+# Rename the columns of the taxonomy table to represent taxonomic ranks
+colnames(merged_metagenomes@tax_table@.Data) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+#Keep only the kingdom of interest
+merged_metagenomes <- subset_taxa(merged_metagenomes, Kingdom =="Bacteria")
+# head(sample_data(merged_metagenomes))
+# head(tax_table(merged_metagenomes))
+physeq <- microbiome::aggregate_rare(merged_metagenomes, level = "Genus", detection = 0.01/100, prevalence = 5/100)
+tax_table_df <- as.data.frame(physeq@tax_table)
+otus_to_keep <- rownames(tax_table_df[tax_table_df$Genus != "Other", ])
+physeq <- prune_taxa(otus_to_keep, physeq)
+
+
+```
+
+## Variable used for the analysis 
+
+```{r}
+# Phyloseq object
+physeq <- microbiome::aggregate_taxa(physeq, level = "Genus")
+# Count data
+counts <- otu_table(physeq) %>% as.data.frame() %>% t()
+meta <- physeq@sam_data
+```
+
+## Create Female and Male dataset 
+
+```{r, cache=TRUE}
+
+# Subset phyloseq object for female samples
+physeq_F <- subset_samples(physeq, sex == "F")
+samples_to_remove <- c("GI-45", "GI-51")
+physeq_F <- prune_samples(!(sample_names(physeq_F) %in% samples_to_remove), physeq_F)
+data_F <- prepare_data(counts = physeq_F@otu_table, covariates = physeq_F@sam_data, offset = "Wrench")
+
+
+# Subset phyloseq object for female samples
+physeq_M <- subset_samples(physeq, sex == "M")
+physeq_M <- prune_samples(!(sample_names(physeq_M) %in% samples_to_remove), physeq_M)
+data_M <- prepare_data(counts = physeq_M@otu_table, covariates = physeq_M@sam_data, offset = "Wrench")
+```
+
+
+# Check the distribution of the data 
+
+We have a clear Poisson distribution.
+
+
+```{r, cache=TRUE, fig.show = "hold", fig.align = "center", out.width = "50%"}
+hist(as.matrix(as.data.frame(physeq@otu_table), nclass = 10, main = "Abundance of the OTU data", xlab = "values"))
+```
+
+
+# Male and female combined through time
+## Poisson lognormal models
+
+The Poisson lognormal model is a statistical model used to describe count data that exhibits overdispersion, which means the variance is greater than
+the mean. This model combines two components: a Poisson distribution and a lognormal distribution.
+
+By combining the Poisson and lognormal distributions, this model provides a flexible approach to modeling count data that exhibit greater variability
+than what can be captured by a simple Poisson distribution alone.
+
+### Create a PNL suited data frame.
+
+```{r, cache=TRUE}
+# data PLN object
+PLN_data <- PLNmodels::prepare_data(counts = counts, covariates = meta)
+```
+
+### Setting up the GLM model
+
+**Intercept (\~1):** - There is a common baseline level of abundance for taxa in the microbiome samples, and zero abundance represents a biological
+state (not a data artifact), then Abundance \~ 1 + offset(log(Offset)) is appropriate. The intercept allows to model this baseline. - Implicitly
+assume that all taxa have some baseline level of abundance, even if some taxa may have zero abundance in certain samples. Whith this model, we are
+looking at how each taxon's abundance varies around this assumed baseline level.
+
+**No Intercept (\~0):** - Zero abundance represents the true absence of a taxon and there isn’t a common baseline abundance that all taxa share, then
+Abundance \~ 0 + offset(log(Offset)) might be more appropriate. This formulation explicitly models the starting point as zero. - **Baseline Level:**
+This refers to a hypothetical or observed starting point or average level of abundance across all taxa in your microbiome samples. It represents a
+point of comparison against which you assess changes or differences. - This approach is useful when zero abundance values (where taxa are absent) are
+not due to technical limitations but rather reflect genuine biological absence. It allows to interpret changes in abundance levels in relation to what
+you consider to be the typical or expected level of abundance for each taxon.
+
+**Offset (offset(log(Offset))):** - **Purpose:** The offset term adjusts for differences in exposure or scaling factors that are known and fixed for
+each observation - **Example:** In microbiome studies, offsets are often used to account for differences in sequencing depth or sampling effort across
+samples. The logarithm transformation (log(Offset)) is common to handle the typical skewness in abundance data.
+
+We can test both models (\~1 and \~0) and evaluate their goodness of fit metrics (like AIC or BIC) to determine which one better captures the
+variability in our data.
+
+```{r, cache=TRUE}
+Model_01_0 <- PLN(PLN_data$Abundance ~ 0 + offset(log(Offset)), PLN_data)
+Model_02_1 <- PLN(PLN_data$Abundance ~ 1 + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+rbind(
+  "No Intercept" = Model_01_0$criteria,
+  "With Intercept" = Model_02_1$criteria
+) %>% knitr::kable()
+```
+
+- **Log-likelihood (loglik)**: A higher value indicates a better fit to the data.
+- **Bayesian Information Criterion (BIC)**: A lower value indicates a better model, balancing model fit and complexity.
+- **Integrated Complete Likelihood (ICL)**: Similar to BIC, a lower ICL value is preferred, with additional penalization for the complexity of the model.
+
+**With Intercept** (`PLN(PLN_data$Abundance ~ 1 + offset(log(Offset)), PLN_data)`) appears to be the better model choice among the two based on
+the given criteria.
+
+## Model evaluation
+
+```{r, cache=TRUE}
+Model_01 <- PLN(PLN_data$Abundance ~ 1, PLN_data)
+```
+
+```{r, cache=TRUE}
+Model_02 <- PLN(PLN_data$Abundance ~ 1 + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+Model_03 <- PLN(PLN_data$Abundance ~ 1 + sex + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+Model_04 <- PLN(PLN_data$Abundance ~ 1 + Ecological.gradient + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+Model_05 <- PLN(PLN_data$Abundance ~ 1 + Caracteristic.Gradient + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+Model_06 <- PLN(PLN_data$Abundance ~ 1 + infection + offset(log(Offset)), PLN_data)
+```
+
+```{r, cache=TRUE}
+results <- rbind(
+  "PLN_data" = Model_01$criteria,
+  "PLN_data Offset" = Model_02$criteria,
+  "PLN_data sex" = Model_03$criteria,
+  "PLN_data Ecological gradient" = Model_04$criteria,
+  "PLN_data Caracteristic Gradient" = Model_05$criteria,
+  "PLN_data Infection" = Model_06$criteria
+)
+
+print(results) %>%
+  arrange(loglik) %>%
+  knitr::kable()
+```
+
+Selected **PLN_data Ecological gradient**.
+
+### GLM-like interface
+
+One can access the fitted value of the counts (Abundance – Y\^) and check that the algorithm basically learned correctly from the data:
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(Model_06)),
+  observed = as.vector(PLN_data$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_bw() +
+  annotation_logticks()
+```
+
+The residual correlation matrix better displays as an image matrix:
+
+```{r, cache=TRUE}
+Model_06 %>%
+  sigma() %>%
+  cov2cor() %>%
+  corrplot::corrplot(, tl.cex = 0.3)
+```
+
+### Observation weights
+
+```{r, cache=TRUE}
+myPLN_weighted <-
+  PLN(
+    PLN_data$Abundance ~ 1 + Ecological.gradient + offset(log(Offset)),
+    data    = PLN_data,
+    weights = runif(nrow(PLN_data)),
+    control = PLN_param(trace = 0)
+  )
+data.frame(
+  unweighted = as.vector(fitted(Model_06)),
+  weighted   = as.vector(fitted(myPLN_weighted))
+) %>%
+  ggplot(aes(x = unweighted, y = weighted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  scale_y_log10(
+    breaks = scales::trans_breaks("log10", function(x) 10^x),
+    labels = scales::trans_format("log10", scales::math_format(10^.x))
+  ) +
+  theme_bw() +
+  annotation_logticks() +
+  labs(x = "Unweighted Fitted Values", y = "Weighted Fitted Values")
+```
+
+**Effect of Small Weights**: Observations with very small weights might be receiving much less influence in the weighted model. If an observation has
+a weight close to zero, its contribution to the fitted values will be minimal. This can lead to significant deviations between the unweighted and
+weighted models, especially if the unweighted model provides a much larger fitted value for those observations.
+
+**General Linear Trend**: Most observations align with a linear relationship, indicating that the weights are generally applied in a consistent manner
+across the dataset. **Distinct Clouds**: The additional clouds suggest that specific subsets of data behave differently, either due to the extreme or
+moderate influence of weights, unique characteristics of those observations, or potential data issues.
+
+```{r, cache=TRUE}
+PLN_data <- PLN_data %>% as.data.frame()
+# Extract unweighted fitted values
+a <- fitted(Model_06) %>% as.data.frame()
+a <- a %>%
+  mutate(Sample = rownames(PLN_data)) %>%
+  column_to_rownames("Sample")
+colnames(a) <- PLN_data$Abundance %>% colnames()
+
+unweighted_df <- a %>%
+  mutate(Ecological.gradient =  PLN_data$Ecological.gradient) %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(-c(Sample, Ecological.gradient), names_to = "Variable", values_to = "Unweighted")
+
+# Extract weighted fitted values
+b <- fitted(myPLN_weighted) %>% as.data.frame()
+b <- b %>%
+  mutate(Sample = rownames(PLN_data)) %>%
+  column_to_rownames("Sample")
+colnames(b) <- PLN_data$Abundance %>% colnames()
+
+weighted_df <- b %>%
+  mutate(Ecological.gradient = PLN_data$Ecological.gradient) %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(-c(Sample, Ecological.gradient), names_to = "Variable", values_to = "Weighted")
+
+# Merge the unweighted and weighted data
+merged_df <- unweighted_df %>%
+  select(Sample, Variable, Unweighted, Ecological.gradient) %>%
+  left_join(weighted_df %>%
+    select(Sample, Variable, Weighted), by = c("Sample", "Variable"))
+
+# Inspect the merged data frame
+head(merged_df)
+
+
+# Define your color palette
+colors <- c(
+  "wild" = "#009392",
+  "ecotone" = "#9ccb86",
+  "farmed land" = "#EEB479",
+  "urban" = "#CF597E"
+)
+
+# Plot with transparency
+ggplot(merged_df, aes(x = Unweighted, y = Weighted, color = Ecological.gradient)) +
+  geom_point(size = 1, alpha = 0.4) + # Adjust alpha for transparency
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_color_manual(values = colors) +
+  theme_bw() +
+  labs(
+    x = "Unweighted Fitted Value",
+    y = "Weighted Fitted Value",
+    color = "Ecological.gradient"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+### Investigating the cloud with larger weights on the x axis
+
+```{r, cache=TRUE}
+results_df <- data.frame(
+  unweighted = as.vector(fitted(Model_06)),
+  weighted = as.vector(fitted(myPLN_weighted)),
+  "Sample" = rownames(PLN_data) # Assuming sample IDs are rownames or add another identifier
+)
+# Filter the dataframe based on the conditions
+filtered_samples <- merged_df %>% filter(Unweighted > 1e-5 & Weighted < 1e-4)
+
+# Print the filtered samples
+head(filtered_samples)
+```
+
+### Investigating the cloud top left corner.
+
+```{r, cache=TRUE}
+# Filter the dataframe based on the conditions
+filtered_samples <- merged_df %>% filter(Unweighted < 1e-4 & Weighted > 1e-6)
+
+# Print the filtered samples
+head(filtered_samples)
+```
+
+## PCA
+
+```{r ,cache=TRUE}
+ticks_pca_clim <- PLNPCA(
+  formula = PLN_data$Abundance ~ 1 +
+    Ecological.gradient +
+    offset(log(Offset)),
+  data = PLN_data,
+  ranks = 1:20
+)
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "ICL")
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = PLN_data$Ecological.gradient)
+```
+
+```{r, cache=TRUE}
+sigma(ticks_pca_clim_best) %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.5, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+```
+
+```{r, cache=TRUE}
+# Define the threshold function
+keep_high_correlations <- function(x) {
+  any(x > 2 | x < -1)
+}
+
+########################### Climatic ##################
+rows_to_keep <- apply(sigma(ticks_pca_clim_best), 1, keep_high_correlations)
+cols_to_keep <- apply(sigma(ticks_pca_clim_best), 2, keep_high_correlations)
+
+# Subset the matrix to keep only the selected rows and columns
+ticks_pca_clim_best_filtered <- sigma(ticks_pca_clim_best)[rows_to_keep, cols_to_keep]
+
+# Print the head of the filtered matrix to check
+# head(oaks_best_pca_filtered)
+ticks_pca_clim_best_filtered %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.4, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+```
+
+```{r, cache=TRUE}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+```{r, cache=TRUE}
+networks_full <- PLNnetwork(formula = PLN_data$Abundance ~ 1 +
+  Ecological.gradient +
+  offset(log(Offset)), data = PLN_data)
+```
+
+### Assessment of the model
+
+```{r, cache=TRUE}
+networks_full$criteria %>%
+  head() %>%
+  knitr::kable()
+```
+
+A diagnostic of the optimization process is available via the \``convergence` field:
+
+```{r, cache=TRUE}
+networks_full$convergence %>%
+  head() %>%
+  knitr::kable()
+```
+
+**convergence:** This column shows the convergence tolerance or criterion. It represents how close the algorithm was to meeting the convergence criteria, with smaller values indicating closer adherence to the convergence criteria. Values close to zero (like the ones shown here) indicate that the models have converged successfully.
+
+```{r, cache=TRUE}
+plot(networks_full, "diagnostic")
+```
+
+### Exploring the path of networks
+
+```{r, cache=TRUE}
+plot(networks_full, reverse = TRUE)
+```
+
+```{r, cache=TRUE}
+coefficient_path(networks_full, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+**How to Interpret:**
+
+-   As the penalty increases (moves right on the x-axis), the regularization strength increases, typically leading to more coefficients shrinking
+    towards zero.
+-   Lines that stay above zero or deviate less from zero indicate more robust and significant relationships between variables, as these edges are less
+    affected by regularization.
+-   Lines that move towards zero quickly as the penalty increases indicate weaker relationships that are regularized out of the model early.
+
+### Choosing a network
+
+```{r, cache=TRUE}
+model_StARS <- getBestModel(networks_full, "StARS")
+plot(networks_full, "stability")
+```
+
+### Structure of a PLNnetworkfit
+
+```{r, cache=TRUE}
+model_StARS
+```
+
+We can finally check that the fitted value of the counts – even with sparse regularization of the covariance matrix – are close to the observed ones:
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(PLN_data$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Stability threashold = 0.9
+
+```{r, cache=TRUE}
+ticks_best_network_2 <- model_StARS
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+
+result <- merged_metagenomes_other@tax_table %>% 
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 97) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month + Offset by sex group",
+  sub = "Stability threashold 0.20 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",vertex.label = V(my_graph_metaN)$name, vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.4,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 6 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+# 
+# # Define the thickness range
+# min_thickness <- 0.5
+# max_thickness <- 3
+# 
+# # Calculate the thickness for each weight
+# thickness_values <- min_thickness + (max_thickness - min_thickness) * normalized_weights
+# 
+# # Create a unique set of thickness values for the legend
+# unique_thickness <- unique(round(thickness_values,digits = 0))
+# 
+# # Generate labels for the thickness values
+# thickness_labels <- round(unique_thickness, 2)
+# 
+# # Add the legend for the weights
+# legend("right",
+#        legend = thickness_labels,
+#        col = "black",
+#        lty = 1, # Line type
+#        lwd = unique_thickness, # Line width corresponding to thickness
+#        title = "Weights",
+#        cex = 0.5, y.intersp = 0.5,
+#        text.font = 3 # Italic text
+# )
+```
+
+```{r, cache=TRUE}
+V(my_graph_metaN)$v_class <- result$Family
+
+c_net_plot(my_graph_metaN,  
+           coors = g_layout_polygon(my_graph_metaN, group = "v_class")
+           )
+```
+
+### Arc diagram
+
+```{r, cache=TRUE}
+## get edgelist
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Trueperella_1","Corynebacterium_6", "Fusobacterium_2","Corynebacterium_1", "Corynebacterium_3", "Corynebacterium_4", "Corynebacterium_8", 
+                   "Streptococcus_1", "Peptoniphilus_1", "Mycobacterium_1", "Rhodococcus_1", "Multi-affiliation1_1", "Sphingomonas_1", 
+                   "Francisella_10", "Francisella_6", "Francisella_9", "Williamsia_2", "Corynebacterium_5", "Multi-affiliation_1", "Corynebacterium_7",
+                   "Halomonas_2", "Mycobacterium_2", "Williamsia_1", "Nocardioides_1",  "Francisella_8", "Xanthomonas_1", "Acinetobacter_2", 
+                   "Staphylococcus_3", "Staphylococcus_4", "Acinetobacter_1", "Candidatus Midichloria_1", "Francisella_4", "Francisella_5", 
+                   "Candidatus Midichloria_2", "Candidatus Midichloria_6", "Candidatus Midichloria_7") 
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("right",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 1
+    #   inset = 1 / 10
+)
+```
+
+
+
+
+
+
+# Female Data Set
+## PCA
+
+```{r, cache=TRUE}
+PLN_data_F <- PLNmodels::prepare_data(counts = count_F, covariates = metadata_F)
+count_f2 <- count_F %>% as.data.frame() %>% t() %>% as.data.frame() %>% select(-"GI-45", -"GI-51") %>% t()
+
+ticks_pca_clim <- PLNPCA(
+  formula = count_f2 ~ 1 +
+    Ecological.gradient +
+    offset(log(Offset)),
+  data = PLN_data_F,
+  ranks = 1:20
+)
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = PLN_data_F$)
+```
+
+```{r, cache=TRUE}
+sigma(ticks_pca_clim_best) %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.5, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+
+# Define the threshold function
+keep_high_correlations <- function(x) {
+  any(x > 2 | x < -1)
+}
+
+########################### Climatic ##################
+rows_to_keep <- apply(sigma(ticks_pca_clim_best), 1, keep_high_correlations)
+cols_to_keep <- apply(sigma(ticks_pca_clim_best), 2, keep_high_correlations)
+
+# Subset the matrix to keep only the selected rows and columns
+ticks_pca_clim_best_filtered <- sigma(ticks_pca_clim_best)[rows_to_keep, cols_to_keep]
+
+# Print the head of the filtered matrix to check
+# head(oaks_best_pca_filtered)
+ticks_pca_clim_best_filtered %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.4, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+```
+
+```{r, cache=TRUE}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data$month <- factor(ticks_data$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_F$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_F <- PLNnetwork(formula = count_f2 ~ 1 +
+  Ecological.gradient  +
+  offset(log(Offset)), data = PLN_data_F)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_F, "diagnostic")
+```
+
+```{r, cache=TRUE}
+coefficient_path(ticks_networks_F, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=TRUE}
+model_StARS <- getBestModel(ticks_networks_F, "StARS")
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_F, "stability")
+```
+
+```{r, cache=TRUE, warning=FALSE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(count_f2)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+## Visualisation
+
+```{r, cache=T}
+
+ticks_best_network_2 <- getBestModel(ticks_networks_F, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- igraph::delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 97) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Corynebacterium_3", "Corynebacterium_8",  "Fusobacterium_2", "Corynebacterium_3", "Corynebacterium_4", "Francisella_10", "Francisella_9", "Corynebacterium_6", "Mycobacterium_2", "Rhodococcus_1" , "Williamsia_1" , "Williamsia_2",  "Nocardioides_1" , "Sphingomonas_1", "Streptococcus_1", "Multi-affiliation_1", "Staphylococcus_3", "Staphylococcus_4","Staphylococcus_6" , "Peptoniphilus_1", "Candidatus Midichloria_2", "Candidatus Midichloria_6", "Candidatus Midichloria_7", "Candidatus Midichloria_3", "Rickettsia_3", "Candidatus Midichloria_4", "Candidatus Midichloria_5", "Rickettsia_1", "Rickettsia_11", "Rickettsia_2", "Rickettsia_6","Rickettsia_10", "Candidatus Midichloria_9","Rickettsia_7", "Rickettsia_7")
+
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+        #        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.45,
+       inset = c(-0.6, -0.02))
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "#AA0000", edge.curved = 0.4,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Female Network"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+
+
+
+
+### Visualisation Female 8 months networks individualy 
+
+```{r}
+library(ndtv)
+```
+
+```{r}
+# Initialize an empty list to store the networks
+network_list <- list()
+
+#  empty named vector 
+unique_months <- unique(ticks_data_F$month)
+
+# Loop through each month and create a network
+for (m in unique_months) {
+  # Filter data for the current month
+  ticks_data_month <- ticks_data_F[ticks_data_F$month == m, ]
+
+    # Create the network using PLNnetwork
+  ticks_networks <- PLNnetwork(formula = Abundance ~ 1 + offset(log(Offset)), data = ticks_data_month)
+  
+  # Get the best model using the StARS criterion
+  model_StARS <- getBestModel(ticks_networks, "StARS",  stability = 0.9)
+  my_graph <- plot(model_StARS, plot = F)
+  # Define the names of the nodes you want to remove
+  nodes_to_remove <- c("monthly_temp", "daily_col_temp", "rel_humid", "analyse_type", "soil_moist", "engorgement_status")
+
+  # Check if those nodes exist in the graph
+  existing_nodes <- V(my_graph)$name %in% nodes_to_remove
+
+  # Remove the vertices that match the nodes_to_remove
+  my_graph <- igraph::delete_vertices(my_graph, V(my_graph)[existing_nodes])
+
+  Isolated <- which(igraph::degree(my_graph) == 0)
+  my_graph_cleaned <- igraph::delete_vertices(my_graph, Isolated)
+  my_graph <- my_graph_cleaned
+  
+  # Store the model in the network list, named by the month
+  network_list[[m]] <- my_graph
+}
+network_list_F <- network_list
+```
+
+#### Print the eight network
+
+```{r}
+sample_count <- table(ticks_data_F$month)
+network_list <- network_list_F
+# Iterate over each network in the network_list
+for (i in unique_months) {
+  
+  my_graph <- network_list_F[[i]]
+  
+  vertices_names <- V(my_graph)$name
+  taxo <- tax_table(physeq)
+  result <- taxo %>%
+      as.data.frame() %>%
+      filter(Genus %in% vertices_names) %>%
+      select(Genus, Family)
+
+  
+  # Extract unique families
+  unique_families <- unique(result$Family)
+  # Generate distinct colors for each family
+  n_colors <- length(unique_families)
+  colors <- khroma::colour("smooth rainbow")(n_colors)
+  # Create a named vector to map each family to a color
+  family_colors <- setNames(colors, unique_families)
+  # Add the color information to the result dataframe
+  result <- result %>%
+    mutate(Color = family_colors[Family])
+
+  # extract abundance OTU
+  otu_table_df <- as.data.frame(otu_table(physeq))
+  abundance <- otu_table_df %>%
+    mutate(Abundance = rowSums(.)) %>%
+    rownames_to_column("vertices_left")
+  abundance_solo <- abundance %>%
+    as.data.frame() %>%
+    filter(vertices_left %in% vertices_names) %>%
+    select(Abundance)
+
+  # # Convert the Abundance column to a numeric vector
+  # vertex_sizes <- as.numeric(abundance_solo$Abundance)
+  # # Scale the vertex sizes for better visibility
+  # vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+  # Assign colors to the vertices
+  V(my_graph)$color <- result$Color
+  # Assign sizes to the vertices
+  # V(my_graph)$size <- vertex_sizes
+  # Choose a layout that spreads out the vertices
+  layout <- igraph::layout_in_circle(my_graph)
+
+  # Define unique colors and families for the legend
+  unique_colors <- unique(result$Color)
+  unique_families <- unique(result$Family)
+
+  # Define edge width for the legend
+  edge_widths <- E(my_graph)$width
+  unique_edge_widths <- unique(edge_widths)
+
+  my_graph_metaN <- c_net_update(my_graph)
+  V(my_graph_metaN)$v_group <- result$Family
+  V(my_graph_metaN)$color <- V(my_graph)$color
+  V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+  V(my_graph_metaN)$v_class <- result$Family
+  E(my_graph_metaN)$color <- E(my_graph)$color
+
+  # Set up plotting parameters
+  par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+  
+  #V(my_graph_metaN)$size <- (log10(V(my_graph_metaN)$size) + 1)*3
+  
+  # Plot the updated graph
+  c_net_plot(my_graph_metaN,
+             vertex.color = V(my_graph_metaN)$color, 
+             vertex.size = ((V(my_graph_metaN)$size)*2), 
+             vertex.label.color = "black",
+             vertex.label = V(my_graph_metaN)$name, 
+             vertex.label.cex = 0.7,
+             edge_width_range = c(0.5, 3), edge.color = "#AA0000", edge.curved = 0.1,
+             legend = F, legend_number = F, 
+             edge_legend_title = "Weight",
+             size_legend = F, size_legend_title = "Abundance",
+             width_legend = T, width_legend_title = "Weight", 
+             main = paste("Network", i, "n =", sample_count[as.character(i)])
+  )
+  
+  # Add legend for families
+  legend("right",
+    legend = unique_families,
+    col = unique_colors,
+    pch = 19,
+    pt.cex = 2,
+    cex = 0.7,
+    text.font = 3,
+    bty = "n",
+    y.intersp = 0.5,
+    inset = 8 / 10
+  )
+
+  # Add title text
+  legend_x <- 0.85
+  legend_y <- 0.9 
+  text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.9, font = 4)
+}
+
+```
+
+### Proximity time line 
+#### Convertion network format
+
+```{r}
+# Convert February network
+february_network <- network::network(as.matrix(igraph::get.edgelist(network_list$February)), directed = igraph::is_directed(network_list$February))
+vertex_names_february <- igraph::V(network_list$February)$name
+network::network.vertex.names(february_network) <- vertex_names_february
+network::set.vertex.attribute(february_network, "vertex.pid", vertex_names_february)
+edge_weights_february <- igraph::E(network_list$February)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(february_network, "weight", value = edge_weights_february)
+
+# Convert March network
+march_network <- network::network(as.matrix(igraph::get.edgelist(network_list$March)), directed = igraph::is_directed(network_list$March))
+vertex_names_march <- igraph::V(network_list$March)$name
+network::network.vertex.names(march_network) <- vertex_names_march
+network::set.vertex.attribute(march_network, "vertex.pid", vertex_names_march)
+edge_weights_march <- igraph::E(network_list$March)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(march_network, "weight", value = edge_weights_march)
+
+# # Convert April network
+# april_network <- network::network(as.matrix(igraph::get.edgelist(network_list$April)), directed = igraph::is_directed(network_list$April))
+# vertex_names_april <- igraph::V(network_list$April)$name
+# network::network.vertex.names(april_network) <- vertex_names_april
+# network::set.vertex.attribute(april_network, "vertex.pid", vertex_names_april)
+# edge_weights_april <- igraph::E(network_list$April)$weight  # Replace 'weight' with actual attribute name
+# network::set.edge.attribute(april_network, "weight", value = edge_weights_april)
+
+# Convert May network
+may_network <- network::network(as.matrix(igraph::get.edgelist(network_list$May)), directed = igraph::is_directed(network_list$May))
+vertex_names_may <- igraph::V(network_list$May)$name
+network::network.vertex.names(may_network) <- vertex_names_may
+network::set.vertex.attribute(may_network, "vertex.pid", vertex_names_may)
+edge_weights_may <- igraph::E(network_list$May)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(may_network, "weight", value = edge_weights_may)
+
+# Convert June network
+june_network <- network::network(as.matrix(igraph::get.edgelist(network_list$June)), directed = igraph::is_directed(network_list$June))
+vertex_names_june <- igraph::V(network_list$June)$name
+network::network.vertex.names(june_network) <- vertex_names_june
+network::set.vertex.attribute(june_network, "vertex.pid", vertex_names_june)
+edge_weights_june <- igraph::E(network_list$June)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(june_network, "weight", value = edge_weights_june)
+
+# Convert July network
+july_network <- network::network(as.matrix(igraph::get.edgelist(network_list$July)), directed = igraph::is_directed(network_list$July))
+vertex_names_july <- igraph::V(network_list$July)$name
+network::network.vertex.names(july_network) <- vertex_names_july
+network::set.vertex.attribute(july_network, "vertex.pid", vertex_names_july)
+edge_weights_july <- igraph::E(network_list$July)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(july_network, "weight", value = edge_weights_july)
+
+# Convert August network
+august_network <- network::network(as.matrix(igraph::get.edgelist(network_list$August)), directed = igraph::is_directed(network_list$August))
+vertex_names_august <- igraph::V(network_list$August)$name
+network::network.vertex.names(august_network) <- vertex_names_august
+network::set.vertex.attribute(august_network, "vertex.pid", vertex_names_august)
+edge_weights_august <- igraph::E(network_list$August)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(august_network, "weight", value = edge_weights_august)
+
+# Convert September network
+september_network <- network::network(as.matrix(igraph::get.edgelist(network_list$September)), directed = igraph::is_directed(network_list$September))
+vertex_names_september <- igraph::V(network_list$September)$name
+network::network.vertex.names(september_network) <- vertex_names_september
+network::set.vertex.attribute(september_network, "vertex.pid", vertex_names_september)
+edge_weights_september <- igraph::E(network_list$September)$weight  # Replace 'weight' with actual attribute name
+network::set.edge.attribute(september_network, "weight", value = edge_weights_september)
+
+# Create a list of networks
+network_list_all <- list(
+  February = february_network,
+  March = march_network,
+  # April = april_network,
+  May = may_network,
+  June = june_network,
+  July = july_network,
+  August = august_network,
+  September = september_network
+)
+
+
+# Create a dynamic network and specify vertex.pid to handle different network sizes
+net_dynamic <- networkDynamic::networkDynamic(network.list = network_list_all, vertex.pid = "vertex.pid")
+
+
+
+
+
+
+
+
+# Plot proximity timeline
+set.seed(235254)
+
+ndtv::proximity.timeline(
+  net_dynamic,
+  mode = "sammon",
+  labels.at = 17,
+  vertex.cex = 4,
+  render.edges = T,
+  chain.direction = "reverse",
+  spline.style='color.attribute',
+  xaxt = "n"
+)
+
+
+
+```
+
+#### Plot proximity timeline
+
+```{r}
+set.seed(235254)
+ndtv::proximity.timeline(
+  net_dynamic,
+  mode = "sammon",
+  labels.at = 17,
+  vertex.cex = 4,
+  render.edges = T,
+  chain.direction = "reverse",
+  spline.style='color.attribute',
+  xaxt = "n"
+)
+```
+
+### Extra viz
+
+#### film strip
+
+```{r}
+ndtv::filmstrip(net_dynamic, displaylabels=F, mfrow = c(2,2),frames = 8 )
+```
+
+#### Phylo, transmission time line, network
+```{r}
+plot(net_dynamic, style = "phylo")
+plot(net_dynamic, style = "network", displaylabels = TRUE)
+plot(net_dynamic, style = "transmissionTimeline")
+```
+
+#### Compute statistic graph-level
+
+```{r}
+#Compute static graph-level sna measure as a time series 
+# since it is time series, easy to plot
+plot( tsna::tSnaStats(net_dynamic,'connectedness', start = 0) )
+# does the network become more or less clustered over time?
+plot( tsna::tSnaStats(net_dynamic,'gtrans', start = 1) )
+```
+
+#### Transitivity and Edge Formation from February to September
+
+```{r}
+# Load necessary package
+library(ggplot2)
+
+# Data for edge formation and months
+edge_formation <- c(62, 12, 4, 10, 19, 15, 6, 39)
+months <- c("February", "March", "April", "May", "June", "July", "August", "September")
+
+# Create a data frame
+df <- data.frame(
+  Month = factor(months, levels = months),  # Ensure months are ordered correctly
+  Edges = edge_formation
+)
+
+# Plotting
+ggplot(df, aes(x = Month, y = Edges)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_text(aes(label = Edges), vjust = -0.5) +  # Add edge numbers on top of bars
+  theme_minimal() +
+  labs(title = "Edge Formation from February to September", 
+       x = "Month", 
+       y = "Number of Edges Formed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+# Load necessary package
+library(ggplot2)
+
+# Data for transitivity and months
+transitivity_values <- c(0.0774578, 0.2608696, 0, 0.2142857, 0.3050847, 0.4090909, 0.7500000, 0.4571429)
+months <- c("February", "March", "April", "May", "June", "July", "August", "September")
+
+# Create a data frame
+df_transitivity <- data.frame(
+  Month = factor(months, levels = months),  # Ensure months are ordered correctly
+  Transitivity = transitivity_values
+)
+
+# Plotting
+ggplot(df_transitivity, aes(x = Month, y = Transitivity)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_text(aes(label = sprintf("%.2f", Transitivity)), vjust = -0.5) +  # Add transitivity values on top of bars
+  theme_minimal() +
+  labs(title = "Global Transitivity from February to September", 
+       x = "Month", 
+       y = "Global Transitivity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+# Male Data Set
+
+## Male data
+
+```{r, cache=TRUE}
+#ticks_data_M
+offset_wrench <- compute_offset(counts = ticks_data_M$Abundance, offset = "CSS")
+
+ticks_data_M$Offset <-offset_wrench
+```
+
+## PCA
+
+```{r, cache=TRUE}
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    month +
+    offset(log(Offset)),
+  data = ticks_data_M,
+  ranks = 1:20
+)
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=TRUE}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_M$month)
+```
+
+```{r, cache=TRUE}
+sigma(ticks_pca_clim_best) %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.5, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+
+# Define the threshold function
+keep_high_correlations <- function(x) {
+  any(x > 2 | x < -1)
+}
+
+########################### Climatic ##################
+rows_to_keep <- apply(sigma(ticks_pca_clim_best), 1, keep_high_correlations)
+cols_to_keep <- apply(sigma(ticks_pca_clim_best), 2, keep_high_correlations)
+
+# Subset the matrix to keep only the selected rows and columns
+ticks_pca_clim_best_filtered <- sigma(ticks_pca_clim_best)[rows_to_keep, cols_to_keep]
+
+# Print the head of the filtered matrix to check
+# head(oaks_best_pca_filtered)
+ticks_pca_clim_best_filtered %>%
+  corrplot::corrplot(is.corr = FALSE, tl.cex = 0.4, col = corrplot::COL2("PiYG"), type = "lower", diag = T)
+```
+
+```{r, cache=TRUE}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data$month <- factor(ticks_data$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_M$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r male network modeling, cache=TRUE}
+ticks_networks_M <- PLNnetwork(formula = Abundance ~ 1 +
+  month +
+  offset(log(Offset)), data = ticks_data_M)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_M, "diagnostic")
+```
+
+```{r male coef network, cache=TRUE}
+coefficient_path(ticks_networks_M, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r male best model, cache=TRUE}
+model_StARS <- PLNmodels::getBestModel(ticks_networks_M, "StARS")
+```
+
+```{r male stability, cache=TRUE}
+plot(ticks_networks_M, "stability")
+```
+
+```{r male fit, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_M$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+## Visualisation
+
+```{r male visualisation, cache=TRUE}
+ticks_best_network_2 <- PLNmodels::getBestModel(ticks_networks_M, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- igraph::delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 97) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Corynebacterium_3", "Corynebacterium_4",  "Corynebacterium_6",
+                   "Peptoniphilus_1", "Mycobacterium_1", "Mycobacterium_2", "Rhodococcus_1", "Williamsia_1", "Williamsia_2",  "Nocardioides_1", "Sphingomonas_1", "Acinetobacter_2", "Staphylococcus_2", "Staphylococcus_4", "Fusobacterium_2", "Candidatus Midichloria_2", "Candidatus Midichloria_6", "Candidatus Midichloria_7", "Candidatus Midichloria_8",  "Rickettsia_10", "Francisella_10", "Francisella_9")
+                   
+
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*1.5), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.4,
+           edge_width_range = c(0.5, 3), edge.color = "#AA0000", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Male Network"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+
+### Visualisation Male 8 months network individualy
+
+```{r}
+library(ndtv)
+```
+
+```{r}
+# Initialize an empty list to store the networks
+network_list <- list()
+
+#  empty named vector 
+unique_months <- unique(ticks_data_M$month)
+
+# Loop through each month and create a network
+for (m in unique_months) {
+  # Filter data for the current month
+  ticks_data_month <- ticks_data_M[ticks_data_M$month == m, ]
+
+    # Create the network using PLNnetwork
+  ticks_networks <- PLNnetwork(formula = Abundance ~ 1 + offset(log(Offset)), data = ticks_data_month)
+  
+  # Get the best model using the StARS criterion
+  model_StARS <- getBestModel(ticks_networks, "BIC",  stability = 0.9)
+  my_graph <- plot(model_StARS, plot = F)
+  # Define the names of the nodes you want to remove
+  nodes_to_remove <- c("monthly_temp", "daily_col_temp", "rel_humid", "analyse_type", "soil_moist", "engorgement_status")
+
+  # Check if those nodes exist in the graph
+  existing_nodes <- V(my_graph)$name %in% nodes_to_remove
+
+  # Remove the vertices that match the nodes_to_remove
+  my_graph <- igraph::delete_vertices(my_graph, V(my_graph)[existing_nodes])
+
+  Isolated <- which(igraph::degree(my_graph) == 0)
+  my_graph_cleaned <- igraph::delete_vertices(my_graph, Isolated)
+  my_graph <- my_graph_cleaned
+  
+  # Store the model in the network list, named by the month
+  network_list[[m]] <- my_graph
+}
+network_list_M <- network_list
+```
+
+### Print the eight network
+
+```{r}
+sample_count <- table(ticks_data_M$month)
+unique_months <- unique(ticks_data_M$month)
+unique_months <- unique_months[1:7]
+network_list <- network_list_M
+
+
+# Extract unique families present across all networks
+unique_families_in_networks <- unique(do.call(c, lapply(network_list, function(net) {
+  vertices_names <- V(net)$name
+  taxo <- tax_table(physeq) %>%
+    as.data.frame() %>%
+    filter(Genus %in% vertices_names) %>%
+    select(Family) %>%
+    pull(Family)
+  return(taxo)
+})))
+
+# Generate distinct colors for the families found in the networks
+n_colors <- length(unique_families_in_networks)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+
+# Create a named vector mapping each family to a unique color
+network_family_colors <- setNames(colors, unique_families_in_networks)
+
+
+
+# Set up a single SVG file to save all plots together
+svg(filename = "Combined_Male_Networks.svg", width = 16, height = 24, family = "serif")  # Adjust width and height as needed
+
+# Use layout() to define a 2-column by 4-row layout with minimal spacing between columns
+layout(matrix(1:8, nrow = 4, ncol = 2, byrow = TRUE), widths = c(1, 1), heights = rep(1, 4))
+
+# Set up plotting parameters with minimal margins
+par(mar = c(0.1, 0.1, 1, 0.1), oma = c(0.5, 0.5, 0.5, 4), bg = "white")  # Adjusted margins for minimal spacing
+
+# Iterate over each network in the network_list and plot them
+for (i in unique_months) {
+  
+  my_graph <- network_list[[i]]
+  
+  vertices_names <- V(my_graph)$name
+  taxo <- tax_table(physeq)
+  result <- taxo %>%
+    as.data.frame() %>%
+    filter(Genus %in% vertices_names) %>%
+    select(Genus, Family)
+  
+  # Use the network-specific color mapping for families present in the current network
+  result <- result %>%
+    mutate(Color = network_family_colors[Family])
+  
+  # Extract abundance OTU
+  otu_table_df <- as.data.frame(otu_table(physeq))
+  abundance <- otu_table_df %>%
+    mutate(Abundance = rowSums(.)) %>%
+    rownames_to_column("vertices_left")
+  abundance_solo <- abundance %>%
+    as.data.frame() %>%
+    filter(vertices_left %in% vertices_names) %>%
+    select(Abundance)
+  
+  # Assign colors to the vertices
+  V(my_graph)$color <- result$Color
+  
+  # Meta-network update
+  my_graph_metaN <- c_net_update(my_graph)
+  V(my_graph_metaN)$v_group <- result$Family
+  V(my_graph_metaN)$color <- V(my_graph)$color
+  V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+  V(my_graph_metaN)$v_class <- result$Family
+  E(my_graph_metaN)$color <- E(my_graph)$color
+  
+  # Plot the updated graph with minimized inner margins
+  c_net_plot(my_graph_metaN,
+             vertex.color = V(my_graph_metaN)$color, 
+             vertex.size = ((V(my_graph_metaN)$size) * 2), 
+             vertex.label.color = "black",
+             vertex.label = V(my_graph_metaN)$name, 
+             vertex.label.cex = 0.4,
+             edge_width_range = c(0.5, 3), edge.color = "#AA0000", edge.curved = 0.1,
+             legend = F, legend_number = F, 
+             edge_legend_title = "Weight",
+             size_legend = F, size_legend_title = "Abundance",
+             width_legend = T, width_legend_title = "Weight", 
+             main = paste("Network", i, "n =", sample_count[as.character(i)])
+  )
+}
+
+# Add a single legend for all the plots in the outer margin
+par(xpd = NA)  # Allow plotting in the outer margins
+legend("topright",  # Adjust position if needed
+       legend = names(network_family_colors),
+       col = network_family_colors,
+       pch = 19,
+       pt.cex = 1,
+       cex = 0.8,
+       text.font = 3,
+       bty = "n",
+       y.intersp = 0.8,
+       title = "Families",
+       inset = c(-0.15, 0)  # Adjust to position the legend in the margin
+)
+
+# Close the SVG device to save all plots in one file
+dev.off()
+
+
+```
+
+#### list of negative link in each network
+
+```{r}
+# Load necessary libraries
+library(igraph)
+library(dplyr)
+
+# Function to extract and save negative interactions for each network with node names
+extract_negative_interactions <- function(network_list, output_file) {
+  # Initialize an empty list to store results
+  negative_interactions_list <- list()
+  
+  # Iterate over each network in the network_list
+  for (network_name in names(network_list)) {
+    my_graph <- network_list[[network_name]]
+    
+    # Check if the graph has weight attribute
+    if ("weight" %in% edge_attr_names(my_graph)) {
+      # Extract edges with negative weights
+      negative_edges <- E(my_graph)[E(my_graph)$weight < 0]
+      
+      # Create a data frame of negative interactions with node names
+      if (length(negative_edges) > 0) {
+        negative_interactions <- data.frame(
+          From = V(my_graph)$name[head_of(my_graph, negative_edges)],  # Starting node name of the edge
+          To = V(my_graph)$name[tail_of(my_graph, negative_edges)],    # Ending node name of the edge
+          Weight = E(my_graph)$weight[negative_edges]                  # Edge weight
+        )
+        
+        # Add the data frame to the list with the network name
+        negative_interactions_list[[network_name]] <- negative_interactions
+      } else {
+        # If no negative interactions, add an empty data frame
+        negative_interactions_list[[network_name]] <- data.frame(
+          From = character(0), To = character(0), Weight = numeric(0)
+        )
+      }
+    } else {
+      cat("Warning: 'weight' attribute is missing in", network_name, "\n")
+      negative_interactions_list[[network_name]] <- data.frame(
+        From = character(0), To = character(0), Weight = numeric(0)
+      )
+    }
+  }
+  
+  # Combine all results into a single file with separate sections
+  sink(output_file)
+  for (network_name in names(negative_interactions_list)) {
+    cat("\n### Negative Interactions in Network:", network_name, "###\n")
+    print(negative_interactions_list[[network_name]])
+  }
+  sink()
+}
+
+# Specify the output file where the results will be saved
+output_file <- "Negative_Interactions_Summary_Male.txt"
+
+# Run the function to extract and save negative interactions
+extract_negative_interactions(network_list, output_file)
+```
+
+### Proximity time line 
+#### Convertion network format
+
+```{r}
+
+#network_list <- network_list[1:7]
+# Convert February network
+february_network <- network::network(as.matrix(igraph::get.edgelist(network_list$February)), directed = igraph::is_directed(network_list$February))
+vertex_names_february <- igraph::V(network_list$February)$name
+network::network.vertex.names(february_network) <- vertex_names_february
+network::set.vertex.attribute(february_network, "vertex.pid", vertex_names_february)
+edge_weights_february <- igraph::E(network_list$February)$weight
+network::set.edge.attribute(february_network, "weight", value = edge_weights_february)
+
+# Convert March network
+march_network <- network::network(as.matrix(igraph::get.edgelist(network_list$March)), directed = igraph::is_directed(network_list$March))
+vertex_names_march <- igraph::V(network_list$March)$name
+network::network.vertex.names(march_network) <- vertex_names_march
+network::set.vertex.attribute(march_network, "vertex.pid", vertex_names_march)
+edge_weights_march <- igraph::E(network_list$March)$weight
+network::set.edge.attribute(march_network, "weight", value = edge_weights_march)
+
+# Convert April network
+april_network <- network::network(as.matrix(igraph::get.edgelist(network_list$April)), directed = igraph::is_directed(network_list$April))
+vertex_names_april <- igraph::V(network_list$April)$name
+network::network.vertex.names(april_network) <- vertex_names_april
+network::set.vertex.attribute(april_network, "vertex.pid", vertex_names_april)
+edge_weights_april <- igraph::E(network_list$April)$weight
+network::set.edge.attribute(april_network, "weight", value = edge_weights_april)
+
+# Convert May network
+may_network <- network::network(as.matrix(igraph::get.edgelist(network_list$May)), directed = igraph::is_directed(network_list$May))
+vertex_names_may <- igraph::V(network_list$May)$name
+network::network.vertex.names(may_network) <- vertex_names_may
+network::set.vertex.attribute(may_network, "vertex.pid", vertex_names_may)
+edge_weights_may <- igraph::E(network_list$May)$weight  
+network::set.edge.attribute(may_network, "weight", value = edge_weights_may)
+
+# Convert June network
+june_network <- network::network(as.matrix(igraph::get.edgelist(network_list$June)), directed = igraph::is_directed(network_list$June))
+vertex_names_june <- igraph::V(network_list$June)$name
+network::network.vertex.names(june_network) <- vertex_names_june
+network::set.vertex.attribute(june_network, "vertex.pid", vertex_names_june)
+edge_weights_june <- igraph::E(network_list$June)$weight 
+network::set.edge.attribute(june_network, "weight", value = edge_weights_june)
+
+# Convert July network
+july_network <- network::network(as.matrix(igraph::get.edgelist(network_list$July)), directed = igraph::is_directed(network_list$July))
+vertex_names_july <- igraph::V(network_list$July)$name
+network::network.vertex.names(july_network) <- vertex_names_july
+network::set.vertex.attribute(july_network, "vertex.pid", vertex_names_july)
+edge_weights_july <- igraph::E(network_list$July)$weight
+network::set.edge.attribute(july_network, "weight", value = edge_weights_july)
+
+# Convert August network
+august_network <- network::network(as.matrix(igraph::get.edgelist(network_list$August)), directed = igraph::is_directed(network_list$August))
+vertex_names_august <- igraph::V(network_list$August)$name
+network::network.vertex.names(august_network) <- vertex_names_august
+network::set.vertex.attribute(august_network, "vertex.pid", vertex_names_august)
+edge_weights_august <- igraph::E(network_list$August)$weight
+network::set.edge.attribute(august_network, "weight", value = edge_weights_august)
+
+# # Convert September network
+# september_network <- network::network(as.matrix(igraph::get.edgelist(network_list$September)), directed = igraph::is_directed(network_list$September))
+# vertex_names_september <- igraph::V(network_list$September)$name
+# network::network.vertex.names(september_network) <- vertex_names_september
+# network::set.vertex.attribute(september_network, "vertex.pid", vertex_names_september)
+# edge_weights_september <- igraph::E(network_list$September)$weight  # Replace 'weight' with actual attribute name
+# network::set.edge.attribute(september_network, "weight", value = edge_weights_september)
+
+# Create a list of networks
+network_list_all <- list(
+  February = february_network,
+  March = march_network,
+  April = april_network,
+  May = may_network,
+  June = june_network,
+  July = july_network,
+  August = august_network
+  #September = september_network
+)
+
+
+###################### Edge colors ######################################
+# # Function to assign colors based on edge weights
+edge_color_func <- function(weight) {
+  ifelse(weight > 0, "#AA0000", "#0066FF")  # Red for positive, Blue for negative
+}
+# 
+# # Iterate over each network in the list and assign colors based on weights
+for (name in names(network_list_all)) {
+  net <- network_list_all[[name]]
+
+  # Check if the 'weight' attribute exists
+  if ("weight" %in% list.edge.attributes(net)) {
+    # Get the edge weights
+    edge_weights <- get.edge.attribute(net, "weight")
+
+    # Assign colors based on the weights
+    edge_colors <- sapply(edge_weights, edge_color_func)
+
+    # Set the edge color attribute
+    set.edge.attribute(net, "color", edge_colors)
+
+    # Update the network in the list
+    network_list_all[[name]] <- net
+  } else {
+    cat("Warning: 'weight' attribute is missing in", name, "\n")
+  }
+}
+
+
+
+
+########################## dynamic network   ############################
+
+
+# Create a dynamic network and specify vertex.pid to handle different network sizes
+net_dynamic <- networkDynamic(network.list = network_list_all, vertex.pid = "vertex.pid")
+
+
+########################## Color by Families ############################
+# Extract vertex IDs and corresponding PIDs from the networkDynamic object
+vertex_ids <- 1:network.size(net_dynamic)  # Numeric IDs assigned by networkDynamic
+vertex_pids <- get.vertex.attribute(net_dynamic, "vertex.pid")  # Original names
+
+# Create a data frame mapping IDs to PIDs (original names)
+vertex_mapping <- data.frame(Vertex_ID = vertex_ids, Vertex_Name = vertex_pids)
+taxo <- tax_table(physeq)
+result <- taxo %>%
+      as.data.frame() %>%
+      filter(Genus %in% vertex_mapping$Vertex_Name) %>%
+      select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+## Sanity, reorder the colors according to vertex_mapping$Vertex_Name
+# result$Genus == vertex_mapping$Vertex_Name
+# First, ensure that Genus and Vertex_Name are character vectors for proper matching
+result$Genus <- as.character(result$Genus)
+vertex_mapping$Vertex_Name <- as.character(vertex_mapping$Vertex_Name)
+
+# Use match to reorder result according to vertex_mapping$Vertex_Name
+ordered_indices <- match(vertex_mapping$Vertex_Name, result$Genus)
+
+# Reorder the result dataframe
+result_ordered <- result[ordered_indices, ]
+
+
+
+
+
+# Plot proximity timeline
+set.seed(235254)
+proximity.timeline(
+  net_dynamic,
+  mode = "sammon",
+  labels.at = 17,
+  vertex.cex = 4,
+  render.edges = T,
+  chain.direction = "reverse",
+  vertex.col = (result_ordered$Color),
+  xaxt = "n",
+  grid = F,
+  spline.style = 'color.attribute'
+                   # default.dist = 1
+  )
+```
+
+#### Plot proximity timeline
+
+```{r}
+set.seed(235254)
+proximity.timeline(
+  net_dynamic,
+  mode = "sammon",
+  labels.at = 17,
+  vertex.cex = 4,
+  render.edges = T,
+  chain.direction = "reverse",
+  spline.style='inactive.ignore',
+  xaxt = "n"
+)
+```
+
+### Extra viz
+
+#### Film strip
+
+```{r}
+filmstrip(net_dynamic, displaylabels=F, )
+```
+
+#### Phylo, transmission time line, network
+
+```{r}
+#Compute static graph-level sna measure as a time series 
+# since it is time series, easy to plot
+plot( tsna::tSnaStats(net_dynamic,'connectedness', start = 0) )
+# does the network become more or less clustered over time?
+plot( tsna::tSnaStats(net_dynamic,'gtrans', start = 0) )
+```
+
+#### Transitivity and edge Formation from February to September
+
+```{r}
+# Load necessary package
+library(ggplot2)
+
+# Data for edge formation and months
+edge_formation <- c(44, 82, 50, 18, 16, 41, 39)
+months <- c("February", "March", "April", "May", "June", "July", "August")
+
+# Create a data frame
+df <- data.frame(
+  Month = factor(months, levels = months),  
+  Edges = edge_formation
+)
+
+# Plotting
+ggplot(df, aes(x = Month, y = Edges)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_text(aes(label = Edges), vjust = -0.5) +  # Add edge numbers on top of bars
+  theme_minimal() +
+  labs(title = "Edge Formation from February to September", 
+       x = "Month", 
+       y = "Number of Edges Formed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+# Load necessary package
+library(ggplot2)
+
+# Data for transitivity and months
+transitivity_values <- c(0.2208589, 0.3251534, 0.2151899, 0.2571429, 0.3461538, 0.3642857, 0.4571429)
+months <- c("February", "March", "April", "May", "June", "July", "August")
+
+# Create a data frame
+df_transitivity <- data.frame(
+  Month = factor(months, levels = months),  # Ensure months are ordered correctly
+  Transitivity = transitivity_values
+)
+
+# Plotting
+ggplot(df_transitivity, aes(x = Month, y = Transitivity)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  geom_text(aes(label = sprintf("%.2f", Transitivity)), vjust = -0.5) +  # Add transitivity values on top of bars
+  theme_minimal() +
+  labs(title = "Global Transitivity from February to September", 
+       x = "Month", 
+       y = "Global Transitivity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+# Combined Summer and Spring dataframes and Male and Female Dataframes
+
+```{r combined, cache=TRUE}
+## Convert 'month' to Factor
+metadata$month <- factor(metadata$month, levels = c("February", "March", "April", "May","June", "July", "August", "September"))
+
+
+df <- left_join(counts_sex, metadata_sex, by = "Sample")
+
+## Spring Data Female and Male
+count_spring <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>%  column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_spring <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>% column_to_rownames("Sample")
+ticks_data_spring <- prepare_data(counts = count_spring, covariates = metadata_spring)
+offset_wrench <- compute_offset(counts = ticks_data_spring$Abundance, offset = "Wrench")
+ticks_data_spring$Offset <-offset_wrench
+
+## Spring Data Female
+count_spring_F <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>%  filter(tick_sex %in% c("F")) %>% column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_spring_F <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>% filter(tick_sex %in% c("F")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>%
+  column_to_rownames("Sample")
+ticks_data_spring_F <- prepare_data(counts = count_spring_F, covariates = metadata_spring_F)
+offset_wrench <- compute_offset(counts = ticks_data_spring_F$Abundance, offset = "CSS")
+ticks_data_spring_F$Offset <-offset_wrench
+
+## Spring Data Male
+count_spring_M <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>%  filter(tick_sex %in% c("M")) %>% column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_spring_M <- df %>%
+  filter(month %in% c("February", "March", "April", "May")) %>% filter(tick_sex %in% c("M")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>%
+  column_to_rownames("Sample")
+ticks_data_spring_M <- prepare_data(counts = count_spring_M, covariates = metadata_spring_M)
+offset_wrench <- compute_offset(counts = ticks_data_spring_M$Abundance, offset = "Wrench")
+ticks_data_spring_M$Offset <-offset_wrench
+
+
+## Summer Data Female and Male
+count_summer <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>%
+  column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_summer <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>%
+  column_to_rownames("Sample")
+ticks_data_summer <- prepare_data(counts = count_summer, covariates = metadata_summer)
+offset_wrench <- compute_offset(counts = ticks_data_summer$Abundance, offset = "Wrench")
+ticks_data_summer$Offset <-offset_wrench
+
+## Summer Data Female
+count_summer_F <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>%
+  filter(tick_sex %in% c("F")) %>%
+  column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_summer_F <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>% filter(tick_sex %in% c("F")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>%
+  column_to_rownames("Sample")
+ticks_data_summer_F <- prepare_data(counts = count_summer_F, covariates = metadata_summer_F)
+offset_wrench <- compute_offset(counts = ticks_data_summer_F$Abundance, offset = "CSS")
+ticks_data_summer_F$Offset <-offset_wrench
+
+## Summer Data Male
+count_summer_M <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>% filter(tick_sex %in% c("M")) %>%
+  column_to_rownames("Sample") %>%
+  select(-tick_sex, -season, -month, -date, -analyse_type, -monthly_temp, -daily_col_temp, -rel_humid, -soil_moist, -engorgement_status)
+metadata_summer_M <- df %>%
+  filter(month %in% c("June", "July", "August", "September")) %>% filter(tick_sex %in% c("M")) %>%
+  select(Sample, tick_sex, season, month, date, engorgement_status, monthly_temp, daily_col_temp, rel_humid, soil_moist) %>%
+  column_to_rownames("Sample")
+ticks_data_summer_M <- prepare_data(counts = count_summer_M, covariates = metadata_summer_M)
+offset_wrench <- compute_offset(counts = ticks_data_summer_M$Abundance, offset = "Wrench")
+ticks_data_summer_M$Offset <-offset_wrench
+
+```
+
+## Spring data Female and Male
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    offset(log(Offset)),
+  data = ticks_data_spring,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_spring$month)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=TRUE}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_spring$month <- factor(ticks_data_spring$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_spring$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_spring <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_spring)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "diagnostic")
+```
+
+```{r, cache=TRUE}
+coefficient_path(ticks_networks_spring, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=F}
+model_StARS <- getBestModel(ticks_networks_spring, "StARS")
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "stability")
+```
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_spring$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_spring, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i %in% c(34, 59, 82, 84, 88, 89)) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=F}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Corynebacterium_2", "Rhodococcus_1" , "Streptococcus_1", "Corynebacterium_1", "Corynebacterium_4", "Williamsia_2", "Multi-affiliation_1", "Sphingomonas_1","Francisella_10", "Francisella_6", "Francisella_9","Corynebacterium_5","Fusobacterium_2", "Acinetobacter_1","Multi-affiliation1_1", "Corynebacterium_7", "Corynebacterium_8", "Mycobacterium_2","Halomonas_2", "Xanthomonas_1", "Candidatus Midichloria_11","Mycobacterium_1","Williamsia_1","Nocardioides_1" ,"Halomonas_1" , "Acinetobacter_2", "Francisella_5" , "Staphylococcus_3" , "Staphylococcus_4", "Staphylococcus_1", "Candidatus Midichloria_2", "Candidatus Midichloria_6","Candidatus Midichloria_7", "Francisella_4",  "Pseudomonas_2" )
+  
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=F}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Spring Network"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+# Spring data Female
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    offset(log(Offset)),
+  data = ticks_data_spring_F,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_spring_F$month)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=TRUE}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_spring_F$month <- factor(ticks_data_spring_F$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_spring_F$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_spring <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_spring_F)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "diagnostic")
+```
+
+```{r, cache=TRUE}
+coefficient_path(ticks_networks_spring, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=F}
+model_StARS <- getBestModel(ticks_networks_spring, "StARS")
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "stability")
+```
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_spring_F$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_spring, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i %in% c(34, 59, 82, 84, 88, 89)) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=F}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Corynebacterium_2", "Rhodococcus_1" , "Streptococcus_1", "Corynebacterium_1", "Corynebacterium_4", "Williamsia_2", "Multi-affiliation_1", "Sphingomonas_1","Francisella_10", "Francisella_6", "Francisella_9","Corynebacterium_5","Fusobacterium_2", "Acinetobacter_1","Multi-affiliation1_1", "Corynebacterium_7", "Corynebacterium_8", "Mycobacterium_2","Halomonas_2", "Xanthomonas_1", "Candidatus Midichloria_11","Mycobacterium_1","Williamsia_1","Nocardioides_1" ,"Halomonas_1" , "Acinetobacter_2", "Francisella_5" , "Staphylococcus_3" , "Staphylococcus_4", "Staphylococcus_1", "Candidatus Midichloria_2", "Candidatus Midichloria_6","Candidatus Midichloria_7", "Francisella_4",  "Pseudomonas_2" )
+  
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=F}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Spring Network Female"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+# Spring data Male
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    offset(log(Offset)),
+  data = ticks_data_spring_M,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_spring_M$month)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=F}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_spring_M$month <- factor(ticks_data_spring_M$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_spring_M$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_spring <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_spring_M)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "diagnostic")
+```
+
+```{r, cache=TRUE}
+coefficient_path(ticks_networks_spring, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=F}
+model_StARS <- getBestModel(ticks_networks_spring, "StARS")
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_spring, "stability")
+```
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_spring_M$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_spring, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i %in% c(34, 59, 82, 84, 88, 89)) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Corynebacterium_2", "Rhodococcus_1" , "Streptococcus_1", "Corynebacterium_1", "Corynebacterium_4", "Williamsia_2", "Multi-affiliation_1", "Sphingomonas_1","Francisella_10", "Francisella_6", "Francisella_9","Corynebacterium_5","Fusobacterium_2", "Acinetobacter_1","Multi-affiliation1_1", "Corynebacterium_7", "Corynebacterium_8", "Mycobacterium_2","Halomonas_2", "Xanthomonas_1", "Candidatus Midichloria_11","Mycobacterium_1","Williamsia_1","Nocardioides_1" ,"Halomonas_1" , "Acinetobacter_2", "Francisella_5" , "Staphylococcus_3" , "Staphylococcus_4", "Staphylococcus_1", "Candidatus Midichloria_2", "Candidatus Midichloria_6","Candidatus Midichloria_7", "Francisella_4",  "Pseudomonas_2" )
+  
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Spring Network Male"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+# Summer data Female and Male
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    offset(log(Offset)),
+  data = ticks_data_summer,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_summer$month)
+```
+
+```{r, cache=F}
+
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=F}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_summer$month <- factor(ticks_data_summer$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_summer$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_summer <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_summer)
+```
+
+```{r, cache=F}
+plot(ticks_networks_summer, "diagnostic")
+```
+
+```{r, cache=F}
+coefficient_path(ticks_networks_summer, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=F}
+model_StARS <- getBestModel(ticks_networks_summer, "StARS")
+```
+
+```{r, cache=F}
+plot(ticks_networks_summer, "stability")
+```
+
+```{r, cache=F}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_summer$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_summer, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 3) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=F}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Trueperella_1" , "Corynebacterium_1", "Corynebacterium_6", "Williamsia_2","Streptococcus_1" , "Peptoniphilus_1" ,   "Corynebacterium_3",  "Corynebacterium_4", "Corynebacterium_8", "Multi-affiliation_1", "Staphylococcus_4", "Francisella_6", "Francisella_10", "Francisella_9", "Fusobacterium_2" , "Mycobacterium_1" , "Mycobacterium_2" , "Rhodococcus_1", "Williamsia_1", "Nocardioides_1", "Sphingomonas_1", "Multi-affiliation1_1", "Staphylococcus_3", "Staphylococcus_5", "Staphylococcus_6", "Helcococcus_1" , "Candidatus Midichloria_14", "Candidatus Midichloria_12", "Rickettsia_10", "Candidatus Midichloria_2")
+                   
+
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Summer Network"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+# Summer data Female
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~   offset(log(Offset)),
+  data = ticks_data_summer_F,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_summer_F$month)
+```
+
+```{r, cache=F}
+
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=F}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=F}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_summer_F$month <- factor(ticks_data_summer_F$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_summer_F$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_summer <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_summer_F)
+```
+
+```{r, cache=F}
+plot(ticks_networks_summer, "diagnostic")
+```
+
+```{r, cache=F}
+coefficient_path(ticks_networks_summer, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=F}
+model_StARS <- getBestModel(ticks_networks_summer, "StARS")
+```
+
+```{r, cache=F}
+plot(ticks_networks_summer, "stability")
+```
+
+```{r, cache=F}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_summer_F$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_summer, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 3) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Trueperella_1" , "Corynebacterium_1", "Corynebacterium_6", "Williamsia_2","Streptococcus_1" , "Peptoniphilus_1" ,   "Corynebacterium_3",  "Corynebacterium_4", "Corynebacterium_8", "Multi-affiliation_1", "Staphylococcus_4", "Francisella_6", "Francisella_10", "Francisella_9", "Fusobacterium_2" , "Mycobacterium_1" , "Mycobacterium_2" , "Rhodococcus_1", "Williamsia_1", "Nocardioides_1", "Sphingomonas_1", "Multi-affiliation1_1", "Staphylococcus_3", "Staphylococcus_5", "Staphylococcus_6", "Helcococcus_1" , "Candidatus Midichloria_14", "Candidatus Midichloria_12", "Rickettsia_10", "Candidatus Midichloria_2")
+                   
+
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Summer Network Female"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+# Summer data Male
+
+## PCA
+
+```{r, cache=F}
+
+# plan(multisession, workers = 15)
+
+ticks_pca_clim <- PLNPCA(
+  formula = Abundance ~ 1 +
+    offset(log(Offset)),
+  data = ticks_data_summer_M,
+  ranks = 1:20
+)
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim)
+```
+
+```{r, cache=F}
+ticks_pca_clim_best <- getBestModel(ticks_pca_clim, crit = "BIC")
+```
+
+```{r, cache=F}
+plot(ticks_pca_clim_best, map = "individual", axes = 1:2, ind_cols = ticks_data_summer_M$month)
+```
+
+```{r, cache=F}
+
+ticks_pca_clim_best %>%
+    sigma() %>%
+    cov2cor() %>%
+    corrplot::corrplot(tl.cex = 0.3)
+```
+
+```{r, cache=F}
+factoextra::fviz_pca_biplot(ticks_pca_clim_best,
+  select.var = list(contrib = 10),
+  labels = NULL,
+  geom = "point"
+) # CONTRIBUTION TOP 20 CLUSTER.
+```
+
+```{r, cache=TRUE}
+# Define a color palette for the months
+month_colors <- c(
+  "February" = "#009392",
+  "March" = "#39b185",
+  "April" = "#9ccb86",
+  "May" = "#E9E29C",
+  "June" = "#EEB479",
+  "July" = "#E88471",
+  "August" = "#CF597E",
+  "September" = "orange"
+)
+
+# Ensure the month variable is a factor with levels in the desired order
+ticks_data_summer_M$month <- factor(ticks_data_summer_M$month, levels = names(month_colors))
+# Plot PCA with ordered legend
+fviz_pca_ind(ticks_pca_clim_best,
+  col.ind = ticks_data_summer_M$month,
+  palette = month_colors,
+  geom.ind = "point",
+  repel = TRUE,
+  pointsize = 4,
+  pointshape = 19,
+  col.var = "black",
+  arrowsize = 0.6,
+  labelsize = 4
+) +
+  labs(color = "Month") +
+  scale_color_manual(values = month_colors) +
+  guides(color = guide_legend(order = 1))
+```
+
+```{r, cache=TRUE}
+fviz_pca_var(ticks_pca_clim_best,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB",
+                    "#E7B800",
+                    "#FC4E07"),
+  select.var = list(contrib = 20)
+)
+```
+
+```{r, cache=TRUE}
+ticks_pca_clim_best$var %>%
+  as.data.frame() %>%
+  select(contrib.Dim.1, contrib.Dim.2) %>%
+  arrange(contrib.Dim.1) %>%
+  tail(n = 10) %>%
+  knitr::kable()
+```
+
+```{r, cache=TRUE}
+fviz_contrib(ticks_pca_clim_best, choice = "var", axes = 1:2, top = 10)
+```
+
+## Network
+
+### Modeling
+
+```{r, cache=F}
+ticks_networks_summer <- PLNnetwork(formula = Abundance ~ 1 +
+  offset(log(Offset)), data = ticks_data_summer_M)
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_summer, "diagnostic")
+```
+
+```{r, cache=TRUE}
+coefficient_path(ticks_networks_summer, corr = TRUE) %>%
+  ggplot(aes(x = Penalty, y = Coeff, group = Edge, colour = Edge)) +
+  geom_line(show.legend = FALSE) +
+  coord_trans(x = "log10") +
+  theme_bw()
+```
+
+```{r, cache=TRUE}
+model_StARS <- getBestModel(ticks_networks_summer, "StARS")
+```
+
+```{r, cache=TRUE}
+plot(ticks_networks_summer, "stability")
+```
+
+```{r, cache=TRUE}
+data.frame(
+  fitted   = as.vector(fitted(model_StARS)),
+  observed = as.vector(ticks_data_summer_M$Abundance)
+) %>%
+  ggplot(aes(x = observed, y = fitted)) +
+  geom_point(size = .5, alpha = .25) +
+  scale_x_log10(limits = c(1, 4000)) +
+  scale_y_log10(limits = c(1, 4000)) +
+  theme_bw() +
+  annotation_logticks()
+```
+
+### Visualisation
+
+```{r, cache=F}
+ticks_best_network_2 <- getBestModel(ticks_networks_summer, crit = "StARS", stability = 0.9)
+
+my_graph <- plot(ticks_best_network_2, plot = F)
+Isolated <- which(igraph::degree(my_graph) == 0)
+my_graph_cleaned <- delete_vertices(my_graph, Isolated)
+# my_graph_cleaned <- delete_vertices(my_graph, c("Francisella_8", "Candidatus Midichloria_11"))
+
+my_graph <- my_graph_cleaned
+
+vertices_names <- V(my_graph)$name
+taxo <- tax_table(physeq)
+result <- taxo %>%
+  as.data.frame() %>%
+  filter(Genus %in% vertices_names) %>%
+  select(Genus, Family)
+
+# Extract unique families
+unique_families <- unique(result$Family)
+# Generate distinct colors for each family
+n_colors <- length(unique_families)
+colors <- khroma::colour("smooth rainbow")(n_colors)
+# Create a named vector to map each family to a color
+family_colors <- setNames(colors, unique_families)
+# Add the color information to the result dataframe
+result <- result %>%
+  mutate(Color = family_colors[Family])
+
+# extract abundance OTU
+otu_table_df <- as.data.frame(otu_table(physeq))
+abundance <- otu_table_df %>%
+  mutate(Abundance = rowSums(.)) %>%
+  rownames_to_column("vertices_left")
+abundance_solo <- abundance %>%
+  as.data.frame() %>%
+  filter(vertices_left %in% vertices_names) %>%
+  select(Abundance)
+
+# # Convert the Abundance column to a numeric vector
+# vertex_sizes <- as.numeric(abundance_solo$Abundance)
+# # Scale the vertex sizes for better visibility
+# vertex_sizes <- (vertex_sizes / max(vertex_sizes)) * 10  # Adjust the multiplier as needed
+# Assign colors to the vertices
+V(my_graph)$color <- result$Color
+# Assign sizes to the vertices
+# V(my_graph)$size <- vertex_sizes
+# Choose a layout that spreads out the vertices
+layout <- igraph::layout_in_circle(my_graph)
+
+# Define unique colors and families for the legend
+unique_colors <- unique(result$Color)
+unique_families <- unique(result$Family)
+
+# Define edge width for the legend
+edge_widths <- E(my_graph)$width
+unique_edge_widths <- unique(edge_widths)
+
+# Edge - Arc colors
+weight <- as.numeric(E(my_graph)$weight)
+color_palette <- colorRampPalette(c("yellow", "red"))(200)
+normalized_weights <- (weight - min(weight)) / (max(weight) - min(weight))
+edge_colors <- sapply(seq_along(normalized_weights), function(i) {
+  if (i == 3) {
+    "#009fff"
+  } else {
+    color_palette[as.integer(normalized_weights[i] * (length(color_palette) - 1)) + 1]
+  }
+})
+edge_attr(my_graph)$color <- edge_colors
+
+E(my_graph)$color <- edge_colors
+
+plot(simplify(my_graph),
+  layout = layout,
+  vertex.size = (V(my_graph)$size) * 2,
+  vertex.label.dist = 1,
+  vertex.label.cex = 0.5,
+  edge.width = E(my_graph)$width,
+  edge.color = E(my_graph)$color,
+  margin = 0.2,
+  main = "Network based on the GLM ~ month",
+  sub = "Stability threashold 0.90 - Verticles colored by families, Edges colored by weight",
+  rescale = T
+)
+legend("left",
+  legend = unique_families,
+  col = unique_colors,
+  pch = 19,
+  title = "Families",
+  pt.cex = 2,
+  cex = 0.5,
+  bty = "n",
+  y.intersp = 0.6,
+  inset = 1 / 10
+)
+```
+
+```{r, cache=TRUE}
+edgelist = as_edgelist(my_graph)
+
+order_species <- c("Trueperella_1" , "Corynebacterium_1", "Corynebacterium_6", "Williamsia_2","Streptococcus_1" , "Peptoniphilus_1" ,   "Corynebacterium_3",  "Corynebacterium_4", "Corynebacterium_8", "Multi-affiliation_1", "Staphylococcus_4", "Francisella_6", "Francisella_10", "Francisella_9", "Fusobacterium_2" , "Mycobacterium_1" , "Mycobacterium_2" , "Rhodococcus_1", "Williamsia_1", "Nocardioides_1", "Sphingomonas_1", "Multi-affiliation1_1", "Staphylococcus_3", "Staphylococcus_5", "Staphylococcus_6", "Helcococcus_1" , "Candidatus Midichloria_14", "Candidatus Midichloria_12", "Rickettsia_10", "Candidatus Midichloria_2")
+                   
+
+
+result <- result %>%  mutate(size = vertex_attr(my_graph)$size)
+result_ordered <- result[match(order_species, result$Genus), ]
+
+# Set the background color to black using par and text parameters
+par(bg = "black", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+# plot arc diagram
+arcplot(edgelist, 
+        cex.labels = 0.7,
+        sorted = FALSE,
+        show.nodes = TRUE,
+        bg.nodes = result_ordered$Color,
+        cex.nodes = (result_ordered$size) * 0.8, 
+        pch.nodes = 21, 
+        lwd.nodes = 0.2, 
+        line = 0,
+        lwd.arcs = 20 * (edge_attr(my_graph)$weight),
+        col.arcs = edge_attr(my_graph)$color,
+        col.labels = "lightgrey", # Set font color for labels
+        col.nodes = "black",  # Set font color for node labels
+        bg = NA # Use NA to keep the par bg color
+#        above = c(1:97,99:114)
+)
+legend("topright",
+       legend = unique_families,
+       col = unique_colors,
+       pch = 19,
+       title = "Families",
+       pt.cex = 2,
+       cex = 0.7,
+       text.font = 3, # Set font to Times New Roman (serif)
+       text.col = "lightgrey", # Set font color to light grey
+       bty = "n",
+       y.intersp = 0.6,
+       inset = c(-0.2, 0.01)
+)
+```
+
+```{r, cache=TRUE}
+my_graph_metaN <- c_net_update(my_graph)
+V(my_graph_metaN)$v_group <- result$Family
+V(my_graph_metaN)$color <- V(my_graph)$color
+V(my_graph_metaN)$size <- vertex_attr(my_graph)$size
+V(my_graph_metaN)$v_class <- result$Family
+E(my_graph_metaN)$color <- E(my_graph)$color
+
+# Set the background color to black using par and text parameters
+par(bg = "white", family = "serif", col.axis = "lightgrey", col.lab = "lightgrey", col.main = "lightgrey", col.sub = "lightgrey")
+
+c_net_plot(my_graph_metaN,
+           vertex.color = V(my_graph_metaN)$color, 
+           vertex.size = ((V(my_graph_metaN)$size)*2), 
+           vertex.label.color = "black",
+           vertex.label = V(my_graph_metaN)$name, 
+           vertex.label.cex = 0.5,
+           edge_width_range = c(0.5, 3), edge.color = "green4", edge.curved = 0.1,
+           legend = F, legend_number = F, 
+           edge_legend_title = "Weight",
+           size_legend = F, size_legend_title = "Abundance",
+           width_legend = T, width_legend_title = "Weight", 
+           main = "Summer Network Male"
+           )
+# vertex_attr(my_graph_metaN)
+# vertex_attr(my_graph)
+legend("right",
+  legend = unique_families,
+  col = unique_colors,
+  # title = "Families",
+  pch = 19,
+  pt.cex = 2,
+  cex = 0.6,
+  text.font = 3,
+  bty = "n",
+  y.intersp = 0.4,
+  inset = 8 / 10
+)
+legend_x <- 0.85
+legend_y <- 0.9 
+text(x = legend_x - 2.5, y = legend_x - 0.35, labels = "Families", pos = 1, cex = 0.8, font = 4)
+```
+
+
+
+```{r}
+future::plan("sequential")
+```
