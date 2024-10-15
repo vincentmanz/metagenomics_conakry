@@ -1,0 +1,7 @@
+[2024-10-13 10:49:38,965] multiqc.core.version_check                         [WARNING]  MultiQC Version v1.25.1 now available!
+[2024-10-13 10:49:38,965] multiqc.core.file_search                           [INFO   ]  Search path: /home/vincent/Documents/metagenomics_conakry/data/fastq/QC
+[2024-10-13 10:49:40,399] multiqc.modules.fastqc.fastqc                      [INFO   ]  Found 160 reports
+[2024-10-13 10:49:40,666] multiqc.core.write_results                         [INFO   ]  Existing reports found, adding suffix to filenames. Use '--force' to overwrite.
+[2024-10-13 10:49:41,030] multiqc.core.write_results                         [INFO   ]  Data        : QC/multiqc_report/multiqc_data_1
+[2024-10-13 10:49:41,304] multiqc.core.write_results                         [INFO   ]  Report      : QC/multiqc_report/multiqc_report_1.html
+[2024-10-13 10:49:41,308] multiqc.multiqc                                    [INFO   ]  MultiQC complete
