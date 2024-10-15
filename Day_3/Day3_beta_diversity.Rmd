@@ -1,5 +1,5 @@
 ---
-title: "Diversity indices"
+title: "Beta Diversity indices"
 author: "Vincent Manzanilla, INTERTRYP, IRD"
 date: "`r Sys.Date()`"
 output: 
@@ -42,6 +42,9 @@ library(dplyr)
 library(tibble)
 library(microbiome)
 library(vegan)
+library(SingleCellExperiment)
+library(ggrepel)
+library(patchwork)
 ```
 
 
@@ -336,75 +339,115 @@ ggplot(merged_data, aes(x = MDS1, y = MDS2)) +
 
 A few combinations of beta diversity metrics and assay types are typically used. For instance, Bray-Curtis dissimilarity and Euclidean distance are often applied to the relative abundance and the clr assays, respectively. Besides beta diversity metric and assay type, the PCoA algorithm is also a variable that should be considered. Below, we show how the choice of these three factors can affect the resulting lower-dimensional data.
 
+### Run NMDS on relabundance assay with Bray-Curtis distances
 
-
-```{r nmds, eval=FALSE}
-
+```{r}
+pseq <- physeq
+# Run NMDS on relabundance assay with Bray-Curtis distances
+pseq <- microbiome::transform(pseq, transform = "compositional")
 # abundances(pseq)
-pseq <- pseq_clr
-pseq_abund  <- abundances(pseq) %>% as.data.frame() 
-pseq_abund <- pseq_abund[order(rowSums(pseq_abund), decreasing = TRUE), ] %>% t()
-# Calculate distance matrix
-species_frac_filtered_dist_bray <- vegdist(pseq_abund, method = "bray")
-# Perform NMDS on distance matrix
-nmds_spec_comp_bray <- metaMDS(species_frac_filtered_dist_bray,distance = "bray",k = 2)
-
-# Run NMDS on compositional assay with Euclidean distances
-# Calculate distance matrix
-species_frac_filtered_dist_euclidean <- vegdist(pseq_abund, method = "euclidean")
-# Perform NMDS on distance matrix
-nmds_spec_comp_euclidean <- metaMDS(species_frac_filtered_dist_euclidean,distance = "euclidean",k = 2)
-
-# Run NMDS on compositional assay with Aitchison distances
-# Calculate distance matrix
-species_frac_filtered_dist_aitchison <- vegdist(pseq_abund, method = "robust.aitchison")
-# Perform NMDS on distance matrix
-nmds_spec_comp_aitchison <- metaMDS(species_frac_filtered_dist_aitchison,distance = "robust.aitchison",k = 2)
-
-# Run NMDS on clr assay with Euclidean distances
-pseq <- aggregate_rare(merged_metagenomes, level = "Genus", detection = 0.1/100, prevalence = 50/100)
-pseq <- microbiome::transform(pseq, transform = "clr")
 pseq  <- abundances(pseq) %>% as.data.frame() 
 pseq <- pseq <- pseq[order(rowSums(pseq), decreasing = TRUE), ] %>% t()
 # Calculate distance matrix
+species_frac_filtered_dist_bray <- vegdist(pseq, method = "bray")
+# Perform NMDS on distance matrix
+nmds_spec_comp_bray <- metaMDS(species_frac_filtered_dist_bray,distance = "bray",k = 2)
+
+
+# Extract NMDS coordinates
+nmds_data <- as.data.frame(nmds_spec_comp_bray$points)
+
+# Add metadata (sex and Time) to the NMDS coordinates
+nmds_data$Ecological.gradient <- sample_data(physeq)$Ecological.gradient
+nmds_data$infection <- sample_data(physeq)$infection
+
+# Plot the NMDS result using ggplot2
+ggplot(nmds_data, aes(x = MDS1, y = MDS2)) +
+    geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +  # Use 'sex' here
+    geom_text_repel(aes(label = infection), size = 3, color = "black") +
+    ggtitle("Bray-Curtis NMDS colored according to Ecological Gradient") +  
+    theme_minimal()
+
+```
+
+
+```{r}
+# Run NMDS on compositional assay with Euclidean distances
+# Calculate distance matrix
 species_frac_filtered_dist_euclidean <- vegdist(pseq, method = "euclidean")
 # Perform NMDS on distance matrix
-nmds_spec_clr_euclidean <- metaMDS(species_frac_filtered_dist_euclidean,distance = "euclidean",k = 2)
-
-# List of NMDS objects and their corresponding titles
-nmds_list <- list(
-  list(data = nmds_spec_comp_bray, title = "Comp Bray"),
-  list(data = nmds_spec_comp_euclidean, title = "Comp Euclidean"),
-  list(data = nmds_spec_comp_aitchison, title = "Comp Aitchison"),
-  list(data = nmds_spec_clr_euclidean, title = "Clr Euclidean")
-)
-
-# Initialize an empty list to store plots
-plot_list <- list()
-
-# Loop through each NMDS object and generate the corresponding plot
-for (nmds_item in nmds_list) {
-  nmds_spec_gg <- as.data.frame(nmds_item$data$points) %>%
-    rownames_to_column("Sample") %>%
-    dplyr::left_join(meta, by = "Sample")
-  
-  plot1 <- ggplot(nmds_spec_gg, aes(x = MDS1, y = MDS2)) +
-    geom_point(aes(color = `Ecological gradient`), size = 3, alpha = 0.5) +
-    geom_text_repel(aes(label = Sample), size = 3, color = "black") +
-    ggtitle(paste("NMDS colored according to Ecological gradient", nmds_item$title)) +
-    theme_minimal()
-  
-  # Add the plot to the plot list
-  plot_list[[nmds_item$title]] <- plot1
-}
-
-# Combine all plots using patchwork
-combined_plot <- wrap_plots(plot_list) +
-  plot_layout(guides = "collect")
-
-# Print the combined plot
-print(combined_plot)
+nmds_spec_comp_euclidean <- metaMDS(species_frac_filtered_dist_euclidean,distance = "euclidean",k = 2)
 ```
+
+
+```{r}
+# Extract NMDS coordinates
+nmds_data <- as.data.frame(nmds_spec_comp_euclidean$points)
+
+# Add metadata (sex and Time) to the NMDS coordinates
+nmds_data$Ecological.gradient <- sample_data(physeq)$Ecological.gradient
+nmds_data$infection <- sample_data(physeq)$infection
+
+# Plot the NMDS result using ggplot2
+ggplot(nmds_data, aes(x = MDS1, y = MDS2)) +
+    geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +  # Use 'sex' here
+    geom_text_repel(aes(label = infection), size = 3, color = "black") +
+    ggtitle("Euclidian NMDS colored according to Ecological Gradient") +  
+    theme_minimal()
+```
+### Run NMDS on compositional assay with Aitchison distances
+
+```{r}
+# Calculate distance matrix
+species_frac_filtered_dist_aitchison <- vegdist(pseq, method = "robust.aitchison")
+# Perform NMDS on distance matrix
+nmds_spec_comp_aitchison <- metaMDS(species_frac_filtered_dist_aitchison,distance = "robust.aitchison",k = 2)
+```
+
+```{r}
+# Extract NMDS coordinates
+nmds_data <- as.data.frame(nmds_spec_comp_aitchison$points)
+
+# Add metadata (sex and Time) to the NMDS coordinates
+nmds_data$Ecological.gradient <- sample_data(physeq)$Ecological.gradient
+nmds_data$infection <- sample_data(physeq)$infection
+
+# Plot the NMDS result using ggplot2
+ggplot(nmds_data, aes(x = MDS1, y = MDS2)) +
+    geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +  # Use 'sex' here
+    geom_text_repel(aes(label = infection), size = 3, color = "black") +
+    ggtitle("Aitchison NMDS colored according to Ecological Gradient") +  
+    theme_minimal()
+```
+
+### Run NMDS on clr assay with Euclidean distances
+
+```{r}
+clr_trans <- microbiome::transform(physeq, transform = "clr")
+clr_trans  <- abundances(clr_trans) %>% as.data.frame() 
+clr_trans  <- clr_trans[order(rowSums(clr_trans), decreasing = TRUE), ] %>% t()
+# Calculate distance matrix
+species_frac_filtered_dist_euclidean <- vegdist(clr_trans, method = "euclidean")
+# Perform NMDS on distance matrix
+nmds_spec_clr_euclidean <- metaMDS(species_frac_filtered_dist_euclidean,distance = "euclidean",k = 2)
+```
+
+```{r}
+# Extract NMDS coordinates
+nmds_data <- as.data.frame(nmds_spec_clr_euclidean$points)
+
+# Add metadata (sex and Time) to the NMDS coordinates
+nmds_data$Ecological.gradient <- sample_data(physeq)$Ecological.gradient
+nmds_data$infection <- sample_data(physeq)$infection
+
+# Plot the NMDS result using ggplot2
+ggplot(nmds_data, aes(x = MDS1, y = MDS2)) +
+    geom_point(aes(color = Ecological.gradient), size = 3, alpha = 0.5) +  # Use 'sex' here
+    geom_text_repel(aes(label = infection), size = 3, color = "black") +
+    ggtitle("Aitchison NMDS colored according to Ecological Gradient") +  
+    theme_minimal()
+```
+
 
 In the Shepard plot, a narrow scatter around a 1:1 line indicates a good fit of the distances to the dissimilarities, while a large scatter or a nonlinear pattern indicates a lack of fit.
 
@@ -427,7 +470,7 @@ In summary, the dbRDA is the more general method that allows a wider variety dis
 We are using the package mia for this analysis, fist we transform our phyloseq object into a mia compatible object. The colData lists the covariates such as Gut and Type...
 
 ```{r mia}
-pseq_mia <-  mia::makeTreeSummarizedExperimentFromPhyloseq(pseq)
+pseq_mia <-  mia::makeTreeSummarizedExperimentFromPhyloseq(physeq)
 
 # Apply relative transform
 pseq_mia <- mia::transformAssay(pseq_mia , method = "hellinger")
@@ -689,4 +732,17 @@ plt_read <- ggplot(nmds_spec_gg, aes(x = MDS1, y = MDS2)) +
 plt_read
 ```
 
+# Network
+
+```{r}
+ig <- make_network(physeq, dist.fun = "bray", max.dist = 0.2)
+
+p <- plot_network(ig, physeq, 
+             color = "Ecological.gradient", 
+             shape = "sex",
+             line_weight = 0.4
+)
+p
+
+```
 
