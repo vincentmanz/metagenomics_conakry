@@ -72,18 +72,6 @@ library(microbiome)
 # microbiome utilities: Extends functionalities of the microbiome package with additional utilities
 library(microbiomeutilities)
 
-# vegan: Functions for ecological analysis, including ordination methods, diversity analysis and other functions for community ecologists
-library(vegan)
-
-# compositions: Provides methods for analyzing compositional data, which is common in fields such as microbiome research
-library(compositions)
-
-# mia: Microbiome Analysis, provides functionalities for microbiome data analysis and visualization
-library(mia)
-
-# miaViz: Visualization utilities for microbiome analysis, part of the mia package ecosystem
-library(miaViz)
-
 # phyloseq: Microbiome Analysis, provides functionalities for microbiome data analysis and visualization
 library(phyloseq)
 ```
@@ -98,17 +86,8 @@ library(ggplot2)
 # hrbrthemes: Contains additional themes, theme components, and utilities for ggplot2
 library(hrbrthemes)
 
-# pheatmap: Pretty heatmaps, provides more control over the heatmap visualization
-library(pheatmap)
-
 # RColorBrewer: Provides color palettes for visualizing data, particularly useful in ggplot2 visualizations
 library(RColorBrewer)
-
-# ggrepel: Extends ggplot2 by adding better text label placement to avoid overlaps
-library(ggrepel)
-
-# patchwork: Makes it easier to combine multiple ggplot2 plots into one overall plot layout
-library(patchwork)
 ```
 :::
 

@@ -42,10 +42,6 @@ library(dplyr)
 library(tibble)
 library(microbiome)
 library(vegan)
-library(FSA)
-library(SingleCellExperiment)
-library(ggrepel)
-library(patchwork)
 ```
 
 
@@ -94,6 +90,42 @@ physeq <- prune_taxa(otus_to_keep, physeq)
 
 ```
 :::
+
+
+
+### sanity check
+
+```{r, eval=FALSE}
+# Identify OTUs with zero counts
+empty_otus <- taxa_names(physeq)[taxa_sums(physeq) == 0]
+
+# Print the empty OTU names
+if (length(empty_otus) > 0) {
+  print(paste("Empty OTUs:", paste(empty_otus, collapse = ", ")))
+} else {
+  print("No empty OTUs.")
+}
+
+# Identify samples with zero counts
+empty_samples <- sample_names(physeq)[sample_sums(physeq) == 0]
+
+# Print the empty sample names
+if (length(empty_samples) > 0) {
+    print(paste("Empty samples:", paste(empty_samples, collapse = ", ")))
+} else {
+    print("No empty samples.")
+}
+```
+
+
+```{r}
+# # Remove samples with no counts
+# physeq_F <- prune_samples(sample_sums(physeq) > 0, physeq)
+# # Remove OTUs with no counts
+physeq <- prune_taxa(taxa_sums(physeq) > 0, physeq)
+pseq <- physeq
+```
+
 
 ::: textbox
 # Data Normalization

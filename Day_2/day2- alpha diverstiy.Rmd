@@ -1,5 +1,5 @@
 ---
-title: "Metabarcing - Diversity indices"
+title: "Metabarcing - Alpha diversity indices"
 author: "Vincent Manzanilla, INTERTRYP, IRD"
 date: "`r Sys.Date()`"
 output: 
@@ -8,7 +8,7 @@ output:
     use_bookdown: true
     thumbnails: false
     number_sections: true
-    css: "ETBII.css"
+    css: "../ETBII.css"
 header-includes:
   - \usepackage{subfig}
   - \usepackage{booktabs}
@@ -89,12 +89,8 @@ pair of lakes as the focused sites.
 
 </details>
 
-# Alpha diversity
+# Loading the packages and environment
 
-A comprehensive list of global indicators of the ecosystem state can be obtained as follows. This includes various measures of richness, evenness,
-diversity, dominance, and rarity with default parameters. See the individual functions for more options regarding parameter tuning.
-
-## Loading the packages and environment
 
 ::: textbox
 ```{r lib, warning=FALSE, echo=FALSE, message=FALSE}
@@ -102,10 +98,6 @@ library(dplyr)
 library(tibble)
 library(microbiome)
 library(vegan)
-library(FSA)
-library(SingleCellExperiment)
-library(ggrepel)
-library(patchwork)
 ```
 :::
 
@@ -113,10 +105,8 @@ library(patchwork)
 
 ::: textbox
 ```{r data}
-setwd("./")
-merged_metagenomes <- phyloseq::import_biom("../data/fastq/kraken/bracken//merge_species.biom") 
+merged_metagenomes <- phyloseq::import_biom("../data/fastq/kraken/bracken//merge_species.biom")
 meta <- readxl::read_excel("../data/Glossina_metadata.xlsx")
-
 
 # Set the new column names in the phyloseq object
 sample_names(merged_metagenomes) <- gsub("_.*$|\\.kraken_report_bracken_genuses$", "", sample_names(merged_metagenomes))
@@ -126,7 +116,7 @@ meta$Sample <- gsub("_.*$", "", meta$Sample)
 meta$Samples <- meta$Sample
 meta <- meta %>% column_to_rownames(var = "Samples")
 
-meta$Sample == sample_names(merged_metagenomes)
+# meta$Sample == sample_names(merged_metagenomes)
 
 # Associate the sorted metadata to the phyloseq object as sample data
 merged_metagenomes@sam_data <- sample_data(meta)
@@ -141,15 +131,66 @@ colnames(merged_metagenomes@tax_table@.Data) <- c("Kingdom", "Phylum", "Class", 
 merged_metagenomes <- subset_taxa(merged_metagenomes, Kingdom =="Bacteria")
 # head(sample_data(merged_metagenomes))
 # head(tax_table(merged_metagenomes))
+physeq <- microbiome::aggregate_rare(merged_metagenomes, level = "Genus", detection = 0.01/100, prevalence = 5/100)
+# Define the list of samples to remove
+samples_to_remove <- c("GI-103", "GI-59", "GI-104", "GI-111", "GI-121", 
+                       "GI-124", "GI-125", "GI-14", "GI-15", "GI-16", 
+                       "GI-17", "GI-25", "GI-26", "GI-27", "GI-28", 
+                       "GI-29", "GI-30", "GI-31", "GI-32", "GI-33", 
+                       "GI-34", "GI-36", "GI-38", "GI-39", "GI-45", "GI-47", "GI-51", "I9", "I7")
+
+# Prune these samples from your phyloseq object
+physeq <- prune_samples(!(sample_names(physeq) %in% samples_to_remove), physeq)
+
+
+tax_table_df <- as.data.frame(physeq@tax_table)
+otus_to_keep <- rownames(tax_table_df[tax_table_df$Genus != "Other", ])
+physeq <- prune_taxa(otus_to_keep, physeq)
 ```
 :::
 
+
+### sanity check
+
+```{r, eval=FALSE}
+# Identify OTUs with zero counts
+empty_otus <- taxa_names(physeq)[taxa_sums(physeq) == 0]
+
+# Print the empty OTU names
+if (length(empty_otus) > 0) {
+  print(paste("Empty OTUs:", paste(empty_otus, collapse = ", ")))
+} else {
+  print("No empty OTUs.")
+}
+
+# Identify samples with zero counts
+empty_samples <- sample_names(physeq)[sample_sums(physeq) == 0]
+
+# Print the empty sample names
+if (length(empty_samples) > 0) {
+    print(paste("Empty samples:", paste(empty_samples, collapse = ", ")))
+} else {
+    print("No empty samples.")
+}
+```
+
+
+```{r}
+# # Remove samples with no counts
+# physeq_F <- prune_samples(sample_sums(physeq) > 0, physeq)
+# # Remove OTUs with no counts
+physeq <- prune_taxa(taxa_sums(physeq) > 0, physeq)
+pseq <- physeq
+```
+
 # Alpha diversity indices
 
+A comprehensive list of global indicators of the ecosystem state can be obtained as follows. This includes various measures of richness, evenness,
+diversity, dominance, and rarity with default parameters. See the individual functions for more options regarding parameter tuning.
+
+
+
 ```{r tab}
-# Aggregate rare taxa at the Species level for the phyloseq object 'merged_metagenomes'
-# Taxa are included if they have a detection threshold of 0.05% and a prevalence of 20%
-pseq <- microbiome::aggregate_rare(merged_metagenomes, level = "Genus", detection = 0.05/100, prevalence = 20/100)
 
 # Calculate the Shannon diversity index for the aggregated phyloseq object 'pseq'
 # The Shannon index measures the diversity within a sample, considering both richness and evenness
@@ -170,7 +211,7 @@ tab <- richness(pseq, detection = 1000)
 head(tab)
 ```
 
-```{r shannon, eval=FALSE}
+```{r shannon1, eval=T}
 sample_data(pseq)$infection <- as.factor(sample_data(pseq)$infection)
 p.shannon_infection <- boxplot_alpha(pseq, 
                            index = "shannon",
@@ -179,7 +220,7 @@ p.shannon_infection <- boxplot_alpha(pseq,
 p.shannon_infection
 ```
 
-```{r shannon, eval=FALSE}
+```{r shannon, eval=T}
 p.shannon_sex <- boxplot_alpha(pseq, 
                            index = "shannon",
                            x_var = "sex",
@@ -187,7 +228,7 @@ p.shannon_sex <- boxplot_alpha(pseq,
 p.shannon_sex
 ```
 
-```{r shannon, eval=FALSE}
+```{r shannon2, eval=T}
 colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Ecological gradient"] <- "Ecological.gradient"
 p.shannon_Ecological_gradient <- boxplot_alpha(pseq, 
                            index = "shannon",
@@ -196,7 +237,7 @@ p.shannon_Ecological_gradient <- boxplot_alpha(pseq,
 p.shannon_Ecological_gradient
 ```
 
-```{r shannon, eval=FALSE}
+```{r shannon3, eval=T}
 colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Caracteristic Gradient"] <- "Caracteristic.Gradient"
 p.shannon_Caracteristic_gradient <- boxplot_alpha(pseq, 
                            index = "shannon",
@@ -205,7 +246,7 @@ p.shannon_Caracteristic_gradient <- boxplot_alpha(pseq,
 p.shannon_Caracteristic_gradient
 ```
 
-```{r Chao1, eval=FALSE}
+```{r Chao1, eval=T}
 sample_data(pseq)$infection <- as.factor(sample_data(pseq)$infection)
 p.Chao1_infection <- boxplot_alpha(pseq, 
                            index = "Chao1",
@@ -214,7 +255,7 @@ p.Chao1_infection <- boxplot_alpha(pseq,
 p.Chao1_infection
 ```
 
-```{r Chao1}
+```{r Chao11}
 p.Chao1_sex <- boxplot_alpha(pseq, 
                            index = "Chao1",
                            x_var = "sex",
@@ -222,7 +263,7 @@ p.Chao1_sex <- boxplot_alpha(pseq,
 p.Chao1_sex
 ```
 
-```{r Chao1, eval=FALSE}
+```{r Chao12, eval=T}
 p.Chao1_Ecological_gradient <- boxplot_alpha(pseq, 
                            index = "Chao1",
                            x_var = "Ecological.gradient",
@@ -230,7 +271,7 @@ p.Chao1_Ecological_gradient <- boxplot_alpha(pseq,
 p.Chao1_Ecological_gradient
 ```
 
-```{r Chao1}
+```{r Chao13}
 colnames(sample_data(pseq))[colnames(sample_data(pseq)) == "Caracteristic Gradient"] <- "Caracteristic.Gradient"
 p.Chao1_Caracteristic_gradient <- boxplot_alpha(pseq, 
                            index = "Chao1",
@@ -257,6 +298,56 @@ the metagenome “bag” and that these two will belong to the same OTU.
 
 **Q: What do you observe?**
 
+
+Alternative:
+
+```{r}
+# get the metadata out as seprate object
+hmp.meta <- meta(pseq)
+
+# Add the rownames as a new colum for easy integration later.
+hmp.meta$sam_name <- (hmp.meta$Ecological.gradient)
+
+hmp.div <- microbiome::alpha(pseq)
+# Add the rownames to diversity table
+hmp.div$Sample <- rownames(hmp.div)
+
+# merge these two data frames into one
+div.df <- merge(hmp.div,hmp.meta, by = "Sample")
+
+# check the tables
+colnames(div.df)
+
+div.df2 <- div.df[, c("sam_name", "diversity_inverse_simpson", "diversity_gini_simpson", "diversity_shannon", "diversity_fisher", "chao1")]
+
+# the names are not pretty. we can replace them
+
+colnames(div.df2) <- c("Type", "Inverse Simpson", "Gini-Simpson", "Shannon", "Fisher", "Chao1")
+
+# check
+colnames(div.df2)
+div_df_melt <- reshape2::melt(div.df2)
+## Using Location as id variables
+
+head(div_df_melt)
+
+library(ggpubr)
+# Now use this data frame to plot 
+p <- ggboxplot(div_df_melt, x = "Type", y = "value",
+               fill = "Type", 
+               palette = "jco", 
+               legend= "right",
+               facet.by = "variable", 
+               scales = "free")
+
+p <- p + rotate_x_text() 
+# we will remove the x axis lables
+
+p <- p + rremove("x.text")
+p
+```
+
+
 # Statistical hypothesis for alpha diversity
 
 ## Normality test: Check the Normal or not normal distribution
@@ -266,7 +357,123 @@ Check normality of data: Shapiro Test & QQ-plots. Shapiro: H0 is «data follow n
 Use the custom function indices_normality() (defined in HELPER/indices_normality.R) plots the results of Shapiro test (Theoritical Quantiles) as well
 as Q-Qplots. Means if p \< 0.05 -\> reject the H0 (so does not follow a normal distribution)
 
-```{r normalization_shap, eval=FALSE}
+![diversity1](img/shap1.png)
+
+Helper function: 
+
+```{r}
+indices_normality <- function(rich, nrow, ncol) {
+  
+  ### p-value < 0.05 means data failed normality test
+  
+  par(mfrow = c(nrow, ncol))
+  
+  for (i in names(rich)) {
+    shap <- shapiro.test(rich[, i])
+    qqnorm(rich[, i], main = i, sub = shap$p.value)
+    qqline(rich[, i])
+  }
+  
+  par(mfrow = c(1, 1))
+}
+
+rankabuncomp<-function (x, y = NULL, factor = NULL, return.data = T, specnames = c(1:3), 
+                        scale = "abundance", scaledx = F, type = "o", rainbow = T, 
+                        legendpos = "topright", xlim = c(1, max1), ylim = c(0, max2), ...) 
+{
+  groups <- table(y[, factor])
+  levels <- names(groups)
+  m <- length(groups)
+  max1 <- max(diversitycomp(x, y, factor1 = factor, index = "richness", 
+                            method = "pooled")[, 2])
+  if (scaledx == T) {
+    xlim <- c(0, 100)
+  }
+  max2 <- max.2 <- 0
+  for (i in 1:m) {
+    if (scale == "abundance") {
+      max.2 <- rankabundance(x, y, factor, levels[i])[1, 
+                                                      "abundance"]
+    }
+    if (scale == "logabun") {
+      max.2 <- rankabundance(x, y, factor, levels[i])[1, 
+                                                      "abundance"]
+    }
+    if (scale == "proportion") {
+      max.2 <- rankabundance(x, y, factor, levels[i])[1, 
+                                                      "proportion"]
+    }
+    if (max.2 > max2) {
+      max2 <- max.2
+    }
+  }
+  if (scale == "accumfreq") {
+    max2 <- 100
+  }
+  max2 <- as.numeric(max2)
+  if (rainbow == F) {
+    if (scale == "logabun" && all.equal(ylim, c(0, max2)) == 
+        T) {
+      ylim <- c(1, max2)
+    }
+    rankabunplot(rankabundance(x, y, factor, levels[1]), 
+                 scale = scale, scaledx = scaledx, type = type, labels = levels[1], 
+                 xlim = xlim, ylim = ylim, pch = 1, specnames = NULL, 
+                 ...)
+    for (i in 2:m) {
+      rankabunplot(rankabundance(x, y, factor, levels[i]), 
+                   addit = T, scale = scale, scaledx = scaledx, 
+                   type = type, labels = levels[i], pch = i, specnames = NULL, 
+                   ...)
+    }
+    legend(legendpos, legend = levels, pch = c(1:m))
+  }
+  else {
+    grDevices::palette(colorspace::rainbow_hcl(m, c = 90, 
+                                               l = 50))
+    if (scale == "logabun" && all.equal(ylim, c(0, max2)) == 
+        T) {
+      ylim <- c(1, max2)
+    }
+    rankabunplot(rankabundance(x, y, factor, levels[1]), 
+                 scale = scale, scaledx = scaledx, type = type, labels = levels[1], 
+                 xlim = xlim, ylim = ylim, col = 1, pch = 1, specnames = NULL, 
+                 ...)
+    for (i in 2:m) {
+      rankabunplot(rankabundance(x, y, factor, levels[i]), 
+                   addit = T, scale = scale, scaledx = scaledx, 
+                   type = type, labels = levels[i], col = i, pch = i, 
+                   specnames = NULL, ...)
+    }
+    legend(legendpos, legend = levels, pch = c(1:m), 
+           col = c(1:m))
+    grDevices::palette("default")
+  }
+  if (return.data == T) {
+    for (i in 1:m) {
+      resulti <- data.frame(rankabundance(x, y, factor, 
+                                          levels[i]))
+      resulti <- data.frame(Grouping = rep(levels[i], nrow(resulti)), 
+                            species = rownames(resulti), labelit = rep(FALSE, 
+                                                                       nrow(resulti)), resulti)
+      spec.max <- min(max(specnames), nrow(resulti))
+      resulti[c(1:spec.max), "labelit"] <- as.logical(1)
+      rownames(resulti) <- NULL
+      if (i == 1) {
+        result <- resulti
+      }
+      else {
+        result <- rbind(result, resulti)
+      }
+    }
+    return(result)
+  }
+}
+```
+
+
+
+```{r normalization_shap, eval=T}
 
 
 tab_s <- microbiome::alpha(pseq, index = 'shannon')
@@ -307,11 +514,21 @@ You can use the ANOVA test to compare the means of the alpha diversity indexes b
 tab <- microbiome::alpha(pseq, index=c("shannon", "Chao1"))
 metadata <- data.frame(sample_data(pseq))
 
-aov_observed <- stats::aov(tab$diversity_shannon ~ sex, metadata)
+aov_observed <- stats::aov(tab$diversity_shannon ~ Ecological.gradient, metadata)
 summary(aov_observed)
 ```
 
-You are comparing the effect of 3 types of experiments.
+You are comparing the effect of 4 types of ecotypes.
+
+
+```{r}
+# Perform pairwise t-tests
+pairwise_result <- pairwise.t.test(tab$diversity_shannon, metadata$Ecological.gradient, p.adjust.method = "BH")
+
+# View the results
+print(pairwise_result)
+
+```
 
 **Q: What are your conclusions? What is the p-value?**
 
@@ -326,6 +543,43 @@ signif_pairgroups
 ```
 
 **Q: What are your conclusions?**
+
+Boxplot representation of the data
+
+```{r boxplot, eval=T}
+# Perform pairwise t-tests for Chao1 index
+pairwise_test <- pairwise.t.test(tab$chao1, metadata$Ecological.gradient, p.adjust.method = "BH")
+
+# Convert the result into a data frame for ggplot2
+pairwise_df <- as.data.frame(pairwise_test$p.value)
+pairwise_df <- pairwise_df %>%
+  tibble::rownames_to_column(var = "group1") %>%
+  tidyr::pivot_longer(-group1, names_to = "group2", values_to = "p.adj") %>%
+  dplyr::filter(!is.na(p.adj) & p.adj < 0.05)  # Keep only significant p-values
+
+
+# Create the boxplot for the Chao1 index with Ecological gradient
+graph_shan <- ggplot(metadata, aes(x = Ecological.gradient, y = tab$chao1)) + 
+  geom_boxplot(alpha = 0.6, fill = c("#264653", "#2A9D8F", "#E9C46A", "#E76F51")) +
+  geom_jitter(aes(colour = Ecological.gradient), 
+              position = position_jitter(0.02), 
+              cex = 2.2) +
+  stat_summary(fun = mean, geom = "point", shape = 17, size = 3, color = "white") +
+  theme_minimal()
+
+# Add significant p-values to the plot
+graph_shan + ggpubr::stat_pvalue_manual(
+  pairwise_df,
+  label = "p.adj",
+  y.position = 15.5,   # Adjust this based on your data range
+  color = "blue",
+  linetype = 1,
+  tip.length = 0.01
+)
+```
+
+
+
 
 ### Parametric (follows normal distribution) AND 2 groups - T-test
 
@@ -366,56 +620,3 @@ pairwise_test
 *ns= non-significant,* =p\<0.05, **=p\<0.01,** *=p\<0.001,* \*\**=p\<0.0001*
 
 **Q: What are your conclusions?**
-
-Boxplot representation of the data
-
-```{r boxplot, eval=FALSE}
-
-graph_shan <- ggplot(metadata, aes(x = Ecological.gradient, y = tab$chao1)) + 
-  geom_boxplot(alpha = 0.6, fill = c("#264653", "#2A9D8F", "#E9C46A", "#E76F51")) +
-  geom_jitter(aes(colour = Caracteristic.Gradient), 
-              position = position_jitter(0.02), 
-              cex = 2.2) +
-  # scale_colour_manual(values = c("#a39715", "#04676e", "orange")) + # Manually set the colors
-  stat_summary(fun = mean, geom = "point", shape = 17, size = 3, color = "white") +
-  theme_minimal() 
-graph_shan
-# # Add p-value on graph
-# graph_shan + ggpubr::stat_pvalue_manual(
-#   pairwise_test,
-#   y.position = 3.5,
-#   label = "p.adj = {p.adj}",
-#   color = "blue",
-#   linetype = 1,
-#   tip.length = 0.01
-# )
-```
-
-Alternative to plot the indexes:
-
-```{r index1}
-plot_richness(merged_metagenomes, measures=c("Chao1", "Simpson"), color="sex")
-```
-
-############################## 
-
-## 1.2 Linear regression
-
-Determination coefficient R2 provides percentage variation in y which is explained by all the x together. Its value is (usually) between 0 and 1 and
-it indicates strength of Linear Regression model. Higher the R2 value, data points are less scattered so it is a good model. Lesser the R2 value is
-more scattered the data points.
-
-```{r reg, eval=FALSE}
-ggplot(tab_merged, aes(x = Ecological.gradient, y = diversity_shannon)) +
-  geom_point() +
-  stat_smooth(method = "lm", col = "red") +
-  ggpmisc::stat_poly_eq(aes(label = paste(after_stat(rr.label),
-                                          after_stat(p.value.label),
-                                          sep = "*\", \"*"))) +
-  theme_minimal()
-```
-
-**Q: try to interpret the results and re-run the regression for observed or shannon instead of chao1**
-
-As a reminder, shannon measures the diversity within a sample, considering both richness and evenness. Chao1 is a measure of the total number of
-species in a sample, and it is based on the number of rare species in the sample.
