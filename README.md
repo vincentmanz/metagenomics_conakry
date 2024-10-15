@@ -23,35 +23,22 @@ Course material for the workshop in metagenomics
      ```
 
    - Set your working directory to the location of the course material.
+   
+     - **For Unix/macOS systems**:
+       ```r
+       setwd("~/Documents/metagenomics_conakry")
+       ```
+
+     - **For Windows systems**:
+       ```r
+       setwd("C:/Users/YourUsername/Documents/metagenomics_conakry")
+       ```
+
+     Be sure to replace `YourUsername` with your actual Windows username.
+
    - Load the environment by running the following command in your console:
    
      ```r
      renv::restore()
      ```
 
-
-
-
-
-
-
-
-
-
-
-To do: 
-- graph with markers from Cutadapt abundance + markers associated
-- revise talk 
-
-
-
-
-Read to biom 
-
-- show the based approach - talk
-- show the multiQC
-- show Cutadapt abundance + markers associated
-
-
-Alpha diversity
-- show the general process
