@@ -42,6 +42,6 @@ Course material for the workshop in metagenomics
    - Load the environment by running the following command in your console:
    
      ```r
-     renv::install(exclude = c("physeq", "microbiome", "mia"))
+     renv::install(exclude = c("microbiome", "phyloseq", "microbiomeutilities","ranacapa", "SingleCellExperiment","mia","miaViz"))     
      ```
 
