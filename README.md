@@ -14,8 +14,11 @@ Course material for the workshop in metagenomics
      ```bash
      git clone https://github.com/vincentmanz/metagenomics_conakry.git
      ```
+3. **Open the R project**
+     
+     Double click on *metagenomics_Conakry.Rproj*, it should open in Rstudio by itself. 
 
-3. **Open RStudio**:
+4. **Setup RStudio**:
    - In the R console, install `renv`:
    
      ```r
@@ -39,6 +42,6 @@ Course material for the workshop in metagenomics
    - Load the environment by running the following command in your console:
    
      ```r
-     renv::restore()
+     renv::install(exclude = c("physeq", "microbiome", "mia"))
      ```
 
