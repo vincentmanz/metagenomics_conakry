@@ -57,6 +57,7 @@ and the third is marker gene based. In this step, we are going to focus on the k
 
 ![benchmark](picture/benchmark.png) [Reference](https://doi.org/10.1186/s40793-024-00561-w)
 
+
 # Taxonomy profiling using Kraken2 & Bracken abundance estimation
 
 K-mer based methods count the k-mer frequency of the reads, and compare it to a model trained with sequences from known genomes. There are a few tools
@@ -78,14 +79,11 @@ wget https://genome-idx.s3.amazonaws.com/kraken/16S_Silva132_20200326.tgz
 
 ## Kraken2 classification
 
-The Kraken sequence classification algorithm. To classify a sequence, each k-mer in the sequence is mapped to the lowest common ancestor (LCA) of the
-genomes that contain that k-mer in a database. The taxa associated with the sequence’s k-mers, as well as the taxa’s ancestors, form a pruned subtree
-of the general taxonomy tree, which is used for classification. In the classification tree, each node has a weight equal to the number of k-mers in
-the sequence associated with the node’s taxon. Each root-to-leaf (RTL) path in the classification tree is scored by adding all weights in the path,
-and the maximal RTL path in the classification tree is the classification path (nodes highlighted in yellow). The leaf of this classification path
-(the orange, leftmost leaf in the classification tree) is the classification used for the query sequence.
+The Kraken sequence classification algorithm. To classify a sequence, each k-mer in the sequence is mapped to the lowest common ancestor (LCA) of the genomes that contain that k-mer in a database. The taxa associated with the sequence’s k-mers, as well as the taxa’s ancestors, form a pruned subtree of the general taxonomy tree, which is used for classification. In the classification tree, each node has a weight equal to the number of k-mers in the sequence associated with the node’s taxon. Each root-to-leaf (RTL) path in the classification tree is scored by adding all weights in the path, and the maximal RTL path in the classification tree is the classification path (nodes highlighted in yellow). The leaf of this classification path (the orange, leftmost leaf in the classification tree) is the classification used for the query sequence.
 
-![kraken](https://github.com/vincentmanz/Metagenomics_2024/blob/main/Day_1/pictures/kraken.jpeg)
+
+![LCA](picture/kraken.jpeg)
+
 
 ```{bash, eval=F}
 cd /home/vincent/Documents/metagenomics_conakry/data/fastq
@@ -137,13 +135,7 @@ done
 
 ## Bracken abundance estimation
 
-What Kraken2 has produced is the classification of each read to a taxonomic rank. This result needs to be further refined to generate species (genus,
-phylum) level abundance table for downstream statistical analysis. This process needs to be done properly. Kraken2 only classifies the reads to the
-Lowest Common Ancestor (LCA) because there are many genomes present in the database have large fractions of their sequences identical to other
-genomes. This leads to the result that for well-populated clades with low genome diversity, Kraken only reports species-level assignments for reads
-from unique regions, while for many species the majority of reads might be classified at a higher level of the taxonomy and the number of reads
-classified directly to a species may be far lower than the actual number present. Therefore, Kraken’s raw read assignments cannot be directly
-translated into species- or strain-level abundance estimates. Bracken has been designed to perform sophisticated probabilistically re-distribution of
+What Kraken2 has produced is the classification of each read to a taxonomic rank. This result needs to be further refined to generate species (genus, phylum) level abundance table for downstream statistical analysis. This process needs to be done properly. Kraken2 only classifies the reads to the Lowest Common Ancestor (LCA) because there are many genomes present in the database have large fractions of their sequences identical to other genomes. This leads to the result that for well-populated clades with low genome diversity, Kraken only reports species-level assignments for reads from unique regions, while for many species the majority of reads might be classified at a higher level of the taxonomy and the number of reads classified directly to a species may be far lower than the actual number present. Therefore, Kraken’s raw read assignments cannot be directly translated into species- or strain-level abundance estimates. Bracken has been designed to perform sophisticated probabilistically re-distribution of
 reads to estimate the abundance.
 
 [Bracken](https://github.com/jenniferlu717/Bracken) takes the output from Kraken and estimate the abundance at user specified level: species, genus,
@@ -179,7 +171,7 @@ NOTE: two sample have little information, they are discarded: - **Gl-114_S44** -
 ### Convert to a biom file
 
 This step runs very fast, a few seconds. It generates two files for each sample in its corresponding subdirectory inside BRACKEN:
-samplename_report_species.txt and samplename.kraken_report_bracken.out. Please take a look at both files to understand what they contain.
+*samplename_report_species.txt* and *samplename.kraken_report_bracken.out. *Please take a look at both files to understand what they contain.
 
 Finally, we are converting the backen report into biom file for the downstrem analysis.
 
