@@ -7,7 +7,7 @@
 
         <meta name="author" content="Vincent Manzanilla, INTERTRYP, IRD" />
     
-        <meta name="date" content="2024-10-08" />
+        <meta name="date" content="2024-10-17" />
     
     <title>R for beginner</title>
     <!-- Material Design fonts -->
@@ -1093,7 +1093,7 @@ display: none;
 	  	  <div id="header">
 	    <h1 class="title">R for beginner</h1>
 	    	    	    	    <h4 class="author">Vincent Manzanilla, INTERTRYP, IRD</h4>
-	    	    	    	    <h4 class="date">08 October 2024</h4>
+	    	    	    	    <h4 class="date">17 October 2024</h4>
 	    	  </div>
 	  	</div>
       </div>
@@ -1153,7 +1153,7 @@ Then download and install the IDE Rstudio
 <p><strong>Where am I?</strong></p>
 <p>To get the current working directory</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">getwd</span>()</span></code></pre></div>
-<pre><code>## [1] &quot;/home/vincent/metagenomics_conakry/Day1&quot;</code></pre>
+<pre><code>## [1] &quot;/home/vincent/Documents/metagenomics_conakry/Day_1/1_R_practical&quot;</code></pre>
 <p><strong>To change my working directory from the console</strong></p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">setwd</span>(<span class="st">&quot;/path/to/my/fancy/project/&quot;</span>)</span></code></pre></div>
 <p>In Rstudio, we can change the working directory by navigating in folder in <strong>File</strong> panel
@@ -1189,7 +1189,6 @@ or by command line (the best way for me)</p>
 <span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a><span class="fu">library</span>(<span class="st">&quot;your package3&quot;</span>)</span></code></pre></div>
 <p>or call the function this way:</p>
 <div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>your_package<span class="sc">::</span><span class="fu">yourfunction</span>()</span></code></pre></div>
-<p><strong><span style="color: red;">On your R session using cloud IFB all the necessary packages are installed</span></strong></p>
 </div>
 </div>
 <div id="expression-and-affectation" class="section level1" number="3">
@@ -2208,39 +2207,24 @@ library.</p>
 <li><strong>sep</strong> : the field separator character. Values on each line of the file are separated by this character. If sep = “” (the default for read.table) the separator is ‘white space’, that is one or more spaces, tabs, newlines or carriage returns.</li>
 <li><strong>dec</strong> : the character used in the file for decimal points.</li>
 </ul>
-<div class="sourceCode" id="cb110"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb110-1"><a href="#cb110-1" tabindex="-1"></a>ds <span class="ot">&lt;-</span> <span class="fu">read.table</span>(<span class="at">file=</span><span class="st">&quot;../data/tryp_metadata.csv&quot;</span>, <span class="at">sep =</span> <span class="st">&quot;,&quot;</span>, <span class="at">header =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb110-2"><a href="#cb110-2" tabindex="-1"></a>ds</span></code></pre></div>
-<pre><code>##      Sample SRA.identifier       Type Time Number.of.days Gut     Reads
-## 1  T1rangPM    SRR15276518 T._rangeli   T1              1  PM  7.701240
-## 2  T1rangAM    SRR15276519 T._rangeli   T1              1  AM 42.786669
-## 3  T0ContPM    SRR15276520    Control   T0              0  PM 12.945862
-## 4  T0ContAM    SRR15276521    Control   T0              0  AM 33.104564
-## 5  T1cruzPM    SRR15276522   T._cruzi   T1              1  PM  9.564389
-## 6  T1cruzAM    SRR15276523   T._cruzi   T1              1  AM 18.341077
-## 7  T1ContAM    SRR15276524    Control   T1              1  AM 19.498048
-## 8  T1ContPM    SRR15276525    Control   T1              1  PM  9.575527
-## 9  T0rangPM    SRR15276526 T._rangeli   T0              0  PM  8.858336
-## 10 T0rangAM    SRR15276527 T._rangeli   T0              0  AM 35.555314
-## 11 T0cruzPM    SRR15276528   T._cruzi   T0              0  PM  9.351766
-## 12 T7rangAM    SRR15276529 T._rangeli   T7              7  AM 12.138032
-## 13 T7rangPM    SRR15276530 T._rangeli   T7              7  PM  6.914360
-## 14 T7cruzPM    SRR15276531   T._cruzi   T7              7  PM  7.324330
-## 15 T7cruzAM    SRR15276532   T._cruzi   T7              7  AM 13.686443
-## 16 T7ContPM    SRR15276533    Control   T7              7  PM  8.173719
-## 17 T7ContAM    SRR15276534    Control   T7              7  AM 18.921651
-## 18 T3rangAM    SRR15276535 T._rangeli   T3              3  AM 21.104708
-## 19 T3rangPM    SRR15276536 T._rangeli   T3              3  PM  8.744824
-## 20 T3cruzPM    SRR15276537   T._cruzi   T3              3  PM  9.079620
-## 21 T3cruzAM    SRR15276538   T._cruzi   T3              3  AM 11.656514
-## 22 T0cruzAM    SRR15276539   T._cruzi   T0              0  AM 19.604168
-## 23 T3ContPM    SRR15276540    Control   T3              3  PM  6.194154
-## 24 T3ContAM    SRR15276541    Control   T3              3  AM  9.339014
-## 25 T2rangPM    SRR15276542 T._rangeli   T2              2  PM  6.284232
-## 26 T2rangAM    SRR15276543 T._rangeli   T2              2  AM 25.297229
-## 27 T2cruzPM    SRR15276544   T._cruzi   T2              2  PM  9.968886
-## 28 T2cruzAM    SRR15276545   T._cruzi   T2              2  AM 15.686465
-## 29 T2ContPM    SRR15276546    Control   T2              2  PM  6.211867
-## 30 T2ContAM    SRR15276547    Control   T2              2  AM 15.033813</code></pre>
+<div class="sourceCode" id="cb110"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb110-1"><a href="#cb110-1" tabindex="-1"></a>ds <span class="ot">&lt;-</span> readxl<span class="sc">::</span><span class="fu">read_excel</span>(<span class="st">&quot;../../data/Glossina_metadata.xlsx&quot;</span>)</span>
+<span id="cb110-2"><a href="#cb110-2" tabindex="-1"></a></span>
+<span id="cb110-3"><a href="#cb110-3" tabindex="-1"></a>ds</span></code></pre></div>
+<pre><code>## # A tibble: 78 × 6
+##    Sample     spp   sex   `Ecological gradient` Caracteristic Gradie…¹ infection
+##    &lt;chr&gt;      &lt;chr&gt; &lt;chr&gt; &lt;chr&gt;                 &lt;chr&gt;                  &lt;chr&gt;    
+##  1 GI-103_SEC Glos… F     ecotone               mangrove periphery     infected 
+##  2 GI-59_SEC  Glos… F     ecotone               mangrove periphery     infected 
+##  3 GI-104_SEC Glos… M     ecotone               mangrove periphery     infected 
+##  4 GI-111_SEC Glos… F     ecotone               mangrove periphery     infected 
+##  5 GI-121_SEC Glos… M     ecotone               mangrove periphery     infected 
+##  6 GI-124_RUR Glos… F     urban                 rural with animals     infected 
+##  7 GI-125_CUL Glos… F     farmed land           rice, palm trees at m… infected 
+##  8 GI-14_CUL  Glos… M     farmed land           rice, palm trees at m… not infe…
+##  9 GI-15_CUL  Glos… F     farmed land           rice, palm trees at m… infected 
+## 10 GI-16_RUR  Glos… F     urban                 rural with animals     infected 
+## # ℹ 68 more rows
+## # ℹ abbreviated name: ¹​`Caracteristic Gradient`</code></pre>
 <p><span style="color: steelblue;">Why I use the parameter <code>header=TRUE</code> ?</span></p>
 </div>
 <div id="to-export-data-set-as-.txt-to-read-in-excel" class="section level3" number="4.3.2">

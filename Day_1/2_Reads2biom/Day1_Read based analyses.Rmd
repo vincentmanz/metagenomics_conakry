@@ -8,7 +8,7 @@ output:
     use_bookdown: true
     thumbnails: false
     number_sections: true
-    css: "ETBII.css"
+    css: "../../ETBII.css"
 header-includes:
   - \usepackage{subfig}
   - \usepackage{booktabs}
@@ -17,6 +17,12 @@ editor_options:
   markdown: 
     wrap: 150
 ---
+
+<!-- Custom title with logo -->
+<div class="title-container">
+  <img src="../../data/IRD.png" alt="IRD Logo" class="logo">
+</div>
+
 
 ```{=html}
 <style>

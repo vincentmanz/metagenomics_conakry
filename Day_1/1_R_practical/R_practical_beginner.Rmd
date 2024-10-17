@@ -8,7 +8,7 @@ output:
     use_bookdown: true
     thumbnails: false
     number_sections: true
-    css: "../ETBII.css"  
+    css: "../../ETBII.css"  
 header-includes:
   - \usepackage{subfig}
   - \usepackage{booktabs}
@@ -19,7 +19,7 @@ editor_options:
 ---
 <!-- Custom title with logo -->
 <div class="title-container">
-  <img src="../data/IRD.png" alt="IRD Logo" class="logo">
+  <img src="../../data/IRD.png" alt="IRD Logo" class="logo">
 </div>
 
 
@@ -127,7 +127,6 @@ or call the function this way:
 your_package::yourfunction()
 ```
 
-**<span style="color: red;">On your R session using cloud IFB all the necessary packages are installed</span>**
 
 # Expression and affectation
 ## Expression
@@ -527,7 +526,8 @@ The main parameter are :
 - **dec** : the character used in the file for decimal points.
 
 ```{r readt}
-ds <- read.table(file="../data/tryp_metadata.csv", sep = ",", header = TRUE)
+ds <- readxl::read_excel("../../data/Glossina_metadata.xlsx")
+
 ds
 ```
 

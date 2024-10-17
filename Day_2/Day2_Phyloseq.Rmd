@@ -18,6 +18,12 @@ editor_options:
     wrap: 150
 ---
 
+<!-- Custom title with logo -->
+<div class="title-container">
+  <img src="../data/IRD.png" alt="IRD Logo" class="logo">
+</div>
+
+
 ```{=html}
 <style>
 
@@ -35,7 +41,7 @@ editor_options:
 ```
 
 
-::: textbox
+
 # Introduction
 
 These exercises are meant to show how to conceptually approach your data analysis but there are many more and different ways to explore your data. The most important thing to keep in mind is that you have to understand your own data and analyses. One way to achieve this is to perform visual explorations that help you to judge whether the data are appropriate for your question.
@@ -43,15 +49,14 @@ These exercises are meant to show how to conceptually approach your data analysi
 Now let’s start the fun!
 
 In R studio.
-:::
+
 
 
 # Load libraries - working environnement
 
 ## Packages for data manipulation and wrangling
 
-::: textbox
-```{r lib1, warning=FALSE, echo=FALSE}
+```{r lib1}
 # dplyr: A grammar of data manipulation, providing a consistent set of verbs to solve common data manipulation challenges
 library(dplyr)
 
@@ -61,11 +66,11 @@ library(tibble)
 # tidyverse: A collection of R packages designed for data science, all sharing an underlying design philosophy, grammar, and data structures
 library(tidyverse)
 ```
-:::
+
 
 ## Packages for microbiome analysis
-::: textbox
-```{r lib2, warning=FALSE, echo=FALSE}
+
+```{r lib2}
 # microbiome: Provides tools for microbiome data analysis and visualization
 library(microbiome)
 
@@ -75,11 +80,10 @@ library(microbiomeutilities)
 # phyloseq: Microbiome Analysis, provides functionalities for microbiome data analysis and visualization
 library(phyloseq)
 ```
-:::
+
 ## Packages for data visualization
 
-::: textbox
-```{r lib3, echo=FALSE, warning=FALSE}
+```{r lib3}
 # ggplot2: A system for creating elegant and versatile data visualizations based on the grammar of graphics
 library(ggplot2)
 
@@ -89,7 +93,6 @@ library(hrbrthemes)
 # RColorBrewer: Provides color palettes for visualizing data, particularly useful in ggplot2 visualizations
 library(RColorBrewer)
 ```
-:::
 
 # Load the data
 
@@ -100,20 +103,20 @@ Let’s first load the relative abundance table.
 For this part we are using the [phyloseq](https://joey711.github.io/phyloseq/) package. The phyloseq package is a tool to import, store, analyze, and graphically display complex phylogenetic sequencing data that has already been clustered into Operational Taxonomic Units (OTUs), especially when there is associated sample data, phylogenetic tree, and/or taxonomic assignment of the OTUs.
 
 First st your working directory:
-::: textbox
+
 ```{r wd}
 setwd("../Day_2/")
 ```
-:::
+
 
 And load your two files:
-::: textbox
+
 ```{r data}
 merged_biom_samples <- phyloseq::import_biom("../data/fastq/kraken/bracken/merge_species.biom") 
 merged_metagenomes <- merged_biom_samples
 meta <- readxl::read_excel("../data/Glossina_metadata.xlsx")
 ```
-:::
+
 
 ## Phyloseq-ize Data
 

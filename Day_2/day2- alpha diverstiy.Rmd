@@ -33,6 +33,12 @@ editor_options:
 }
 </style>
 ```
+
+<!-- Custom title with logo -->
+<div class="title-container">
+  <img src="../data/IRD.png" alt="IRD Logo" class="logo">
+</div>
+
 # Diversity indices Introduction
 
 Species diversity, in its simplest definition, is the number of species in a particular area and their relative abundance (evenness). Once we know the
@@ -89,21 +95,19 @@ pair of lakes as the focused sites.
 
 </details>
 
-# Loading the packages and environment
+# Loading the packages and Data
 
-
-::: textbox
-```{r lib, warning=FALSE, echo=FALSE, message=FALSE}
+## Packages
+  
+```{r}
 library(dplyr)
 library(tibble)
 library(microbiome)
 library(vegan)
 ```
-:::
 
 ## load the data
 
-::: textbox
 ```{r data}
 merged_metagenomes <- phyloseq::import_biom("../data/fastq/kraken/bracken//merge_species.biom")
 meta <- readxl::read_excel("../data/Glossina_metadata.xlsx")
@@ -147,7 +151,7 @@ tax_table_df <- as.data.frame(physeq@tax_table)
 otus_to_keep <- rownames(tax_table_df[tax_table_df$Genus != "Other", ])
 physeq <- prune_taxa(otus_to_keep, physeq)
 ```
-:::
+
 
 
 ### sanity check
